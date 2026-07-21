@@ -1,0 +1,45 @@
+# === Secrets & sensitive data — NEVER commit ===
+# This project handles keys that decrypt the entire journal.
+*.key
+*.pem
+secrets/
+.env
+.env.*
+!.env.example
+
+# Master key / session / auth material
+master-key*
+session*.json
+storage-state*.json
+auth/
+tokens/
+
+# Headless browser profiles (contain persisted key + session)
+profile/
+profiles/
+.chromium-profile/
+user-data-dir/
+
+# The decrypted local mirror and any journal data
+mirror.db
+mirror.db-*
+*.sqlite
+*.sqlite3
+data/
+exports/
+*.dayone-export.json
+recon/          # DevTools/CDP recon scratch: HAR, logged key/iv/plaintext
+
+# === Node / TS ===
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+.turbo/
+
+# === Editor / OS ===
+.DS_Store
+.idea/
+.vscode/
+*.log
