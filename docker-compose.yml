@@ -1,0 +1,42 @@
+# dayone-headless — always-on MCP + periodic REST sync, sharing one mirror.
+#
+#   1. cp .env.example .env   # fill in DAYONE_ENCRYPTION_KEY + DAYONE_EMAIL/PASSWORD
+#   2. docker compose up -d
+#
+# The `sync` service refreshes the mirror on an interval (incremental — cheap);
+# the `mcp` service serves it read-only over streamable-HTTP. Expose `mcp` behind
+# a Cloudflare Access tunnel (like the OmniFocus bridge) — do NOT publish it raw.
+
+services:
+  sync:
+    build: .
+    image: dayone-headless
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DAYONE_MIRROR: /data/mirror.db
+    volumes:
+      - mirror:/data
+    # Incremental sync every DAYONE_SYNC_INTERVAL seconds (default 1h).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'while true; do bun run src/serve/cli.ts sync || echo "sync failed; retrying next cycle"; sleep "${DAYONE_SYNC_INTERVAL:-3600}"; done'
+
+  mcp:
+    image: dayone-headless
+    depends_on:
+      - sync
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DAYONE_MIRROR: /data/mirror.db
+      DAYONE_MCP_PORT: "8477"
+    volumes:
+      - mirror:/data
+    # Bind to loopback only; front it with cloudflared + CF Access for remote use.
+    ports:
+      - "127.0.0.1:8477:8477"
+    command: ["mcp"]
+
+volumes:
+  mirror:

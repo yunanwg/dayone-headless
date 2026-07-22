@@ -1,0 +1,32 @@
+# Keep the prod image lean and secret-free. The browser ingester (Playwright) is
+# a dev/oracle tool and is NOT shipped — the image runs the REST ingester only.
+.git
+.github
+node_modules
+dist
+build
+
+# secrets & decrypted data — must never enter an image layer
+.env
+.env.*
+!.env.example
+recon/
+profile/
+profiles/
+mirror.db
+mirror.db-*
+*.sqlite
+*.sqlite3
+data/
+exports/
+
+# dev-only: browser ingester (Playwright), tests, docs, tooling
+src/ingest/browser/
+test/
+docs/
+scripts/
+biome.json
+lefthook.yml
+.gitleaks.toml
+.editorconfig
+*.md

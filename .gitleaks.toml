@@ -1,0 +1,19 @@
+# gitleaks secret-scanning config. This project handles keys that decrypt the
+# entire journal, so scanning is enforced in CI and (best-effort) pre-commit.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic test fixtures and documented placeholders — never real secrets."
+paths = [
+  '''test/fixtures/.*''',
+  '''\.env\.example''',
+]
+# Placeholder / synthetic values that appear in tests and docs.
+regexes = [
+  '''AAAA1111BBBB2222CCCC3333DDDD4444''',
+  '''0123456789abcdef0123456789abcdef''',
+  '''1{16,}''',
+  '''D1-<userId>-<code''',
+  '''D1-user\d+-''',
+]

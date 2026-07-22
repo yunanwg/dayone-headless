@@ -1,0 +1,24 @@
+# Git hooks (lefthook). Installed via `bun install` (the "prepare" script) or
+# `bunx lefthook install`. Fast, parallel, and secret-aware.
+pre-commit:
+  parallel: true
+  commands:
+    biome:
+      glob: "*.{ts,json,jsonc}"
+      run: bunx biome check --no-errors-on-unmatched {staged_files}
+    typecheck:
+      run: bun run typecheck
+    gitleaks:
+      # Best-effort locally; CI enforces it. Never blocks a commit just because the
+      # binary is missing, but DOES block a commit that leaks a secret.
+      run: >
+        if command -v gitleaks >/dev/null 2>&1; then
+          gitleaks git --staged --redact --no-banner;
+        else
+          echo "gitleaks not installed — CI will scan (brew install gitleaks)";
+        fi
+
+pre-push:
+  commands:
+    test:
+      run: bun test

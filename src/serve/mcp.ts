@@ -1,23 +1,33 @@
 #!/usr/bin/env bun
-
 /**
- * dayone-headless MCP server — read-only access to the local journal mirror over
- * stdio. Pure serving layer: it reads the SQLite mirror and knows nothing about
- * Day One, the network, or crypto. Every tool surfaces `synced_at` so an agent
- * knows how fresh the data is. Media BYTES are not served here (see docs); tools
- * return media metadata only.
+ * dayone-headless MCP server — read-only access to the local journal mirror. Pure
+ * serving layer: it reads the SQLite mirror and knows nothing about Day One, the
+ * network, or crypto. Every tool surfaces `synced_at` so an agent knows how fresh
+ * the data is. Media BYTES are not served here — tools return media metadata only.
+ *
+ * Transport: stdio by default (for local MCP clients that spawn the process). Set
+ * DAYONE_MCP_PORT to serve streamable-HTTP instead (for an always-on homelab
+ * service, e.g. behind a Cloudflare Access tunnel).
  */
 
 import { existsSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import { getEntry, getSyncedAt, listJournals, onThisDay, searchEntries } from "./queries.ts";
 
-if (!existsSync(DEFAULT_MIRROR)) {
-  console.error(`mirror not found at ${DEFAULT_MIRROR}. Run a sync first (bun run src/ingest/rest/sync.ts).`);
-  process.exit(1);
+// Wait for the mirror to exist (a sibling `sync` may still be doing the first
+// sync). Poll up to DAYONE_MIRROR_WAIT seconds (default 300), then give up.
+const waitS = Number(process.env.DAYONE_MIRROR_WAIT ?? 300);
+const deadline = Date.now() + waitS * 1000;
+while (!existsSync(DEFAULT_MIRROR)) {
+  if (Date.now() > deadline) {
+    console.error(`mirror not found at ${DEFAULT_MIRROR} after ${waitS}s. Run \`dayone sync\` first.`);
+    process.exit(1);
+  }
+  await Bun.sleep(3000);
 }
 const db = openMirror(); // read-only
 
@@ -30,72 +40,91 @@ const todayMonthDay = () => {
   return `${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
 };
 
-const server = new McpServer(
-  { name: "dayone-headless", version: "0.1.0" },
-  {
-    instructions:
-      "Read-only access to a personal Day One journal mirror. Use search_entries or " +
-      "on_this_day to find entries, then get_entry for full content. `synced_at` on each " +
-      "result says how fresh the mirror is. This is READ-ONLY — you cannot create or edit entries.",
-  },
-);
-
-server.registerTool(
-  "list_journals",
-  {
-    description: "List journals with entry counts, plus when the mirror was last synced.",
-    inputSchema: {},
-    annotations: READ_ONLY,
-  },
-  async () => json({ synced_at: getSyncedAt(db), journals: listJournals(db) }),
-);
-
-server.registerTool(
-  "search_entries",
-  {
-    description:
-      "Full-text search over entry bodies. Returns matches (uuid, date, place, snippet), " +
-      "highest-ranked first. Call get_entry with a uuid for the full entry.",
-    inputSchema: {
-      query: z.string().describe("FTS5 query, e.g. 'paris coffee' or 'trip NOT work'"),
-      limit: z.number().int().min(1).max(100).default(25).describe("max results (default 25)"),
+function buildServer(): McpServer {
+  const server = new McpServer(
+    { name: "dayone-headless", version: "0.1.0" },
+    {
+      instructions:
+        "Read-only access to a personal Day One journal mirror. Use search_entries or " +
+        "on_this_day to find entries, then get_entry for full content. `synced_at` on each " +
+        "result says how fresh the mirror is. This is READ-ONLY — you cannot create or edit entries.",
     },
-    annotations: READ_ONLY,
-  },
-  async ({ query, limit }) => json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, limit) }),
-);
+  );
 
-server.registerTool(
-  "get_entry",
-  {
-    description: "Get one entry's full content + metadata by uuid (media is metadata-only).",
-    inputSchema: { uuid: z.string().describe("entry uuid from search_entries / on_this_day") },
-    annotations: READ_ONLY,
-  },
-  async ({ uuid }) => {
-    const entry = getEntry(db, uuid);
-    return entry
-      ? json(entry)
-      : { content: [{ type: "text" as const, text: `no entry: ${uuid}` }], isError: true };
-  },
-);
-
-server.registerTool(
-  "on_this_day",
-  {
-    description: "Entries whose month-day matches the given date (across all years). Defaults to today.",
-    inputSchema: {
-      month_day: z
-        .string()
-        .regex(/^\d{2}-\d{2}$/)
-        .optional()
-        .describe("MM-DD, e.g. 07-22; default today"),
+  server.registerTool(
+    "list_journals",
+    {
+      description: "List journals with entry counts, plus when the mirror was last synced.",
+      inputSchema: {},
+      annotations: READ_ONLY,
     },
-    annotations: READ_ONLY,
-  },
-  async ({ month_day }) =>
-    json({ synced_at: getSyncedAt(db), results: onThisDay(db, month_day ?? todayMonthDay()) }),
-);
+    async () => json({ synced_at: getSyncedAt(db), journals: listJournals(db) }),
+  );
 
-await server.connect(new StdioServerTransport());
-console.error("dayone-headless MCP server ready (read-only, stdio)");
+  server.registerTool(
+    "search_entries",
+    {
+      description:
+        "Full-text search over entry bodies. Returns matches (uuid, date, place, snippet), " +
+        "highest-ranked first. Call get_entry with a uuid for the full entry.",
+      inputSchema: {
+        query: z.string().describe("FTS5 query, e.g. 'paris coffee' or 'trip NOT work'"),
+        limit: z.number().int().min(1).max(100).default(25).describe("max results (default 25)"),
+      },
+      annotations: READ_ONLY,
+    },
+    async ({ query, limit }) =>
+      json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, limit) }),
+  );
+
+  server.registerTool(
+    "get_entry",
+    {
+      description: "Get one entry's full content + metadata by uuid (media is metadata-only).",
+      inputSchema: { uuid: z.string().describe("entry uuid from search_entries / on_this_day") },
+      annotations: READ_ONLY,
+    },
+    async ({ uuid }) => {
+      const entry = getEntry(db, uuid);
+      return entry
+        ? json(entry)
+        : { content: [{ type: "text" as const, text: `no entry: ${uuid}` }], isError: true };
+    },
+  );
+
+  server.registerTool(
+    "on_this_day",
+    {
+      description: "Entries whose month-day matches the given date (across all years). Defaults to today.",
+      inputSchema: {
+        month_day: z
+          .string()
+          .regex(/^\d{2}-\d{2}$/)
+          .optional()
+          .describe("MM-DD, e.g. 07-22; default today"),
+      },
+      annotations: READ_ONLY,
+    },
+    async ({ month_day }) =>
+      json({ synced_at: getSyncedAt(db), results: onThisDay(db, month_day ?? todayMonthDay()) }),
+  );
+
+  return server;
+}
+
+const server = buildServer();
+const port = process.env.DAYONE_MCP_PORT;
+
+if (port) {
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  await server.connect(transport);
+  Bun.serve({
+    port: Number(port),
+    hostname: process.env.DAYONE_MCP_HOST ?? "0.0.0.0",
+    fetch: (req) => transport.handleRequest(req),
+  });
+  console.error(`dayone-headless MCP server ready (read-only, http :${port})`);
+} else {
+  await server.connect(new StdioServerTransport());
+  console.error("dayone-headless MCP server ready (read-only, stdio)");
+}
