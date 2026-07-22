@@ -88,7 +88,7 @@ test("decryptEntryContent (type-02) recovers plaintext, incl. gzip + JSON-header
   const contentKey = rand(32);
   const lockedKey = new Uint8Array(await subtle.encrypt({ name: "RSA-OAEP" }, journal.publicKey, contentKey));
   const iv = rand(12);
-  const known = "tierc-synthetic-entry-plaintext-日记";
+  const known = "rest-synthetic-entry-plaintext-日记";
   const gz = new Uint8Array(gzipSync(new TextEncoder().encode(known)));
   const d1 = cat(
     bytes(0x44, 0x31, 0x01, 0x02),
