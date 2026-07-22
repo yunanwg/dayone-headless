@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Tier A ingester — orchestrator.
+ * Browser ingester — orchestrator.
  *
  *   drive web app (authenticated) → force-load every journal → dump DODexie →
  *   COMPLETENESS GATE → map to export shape → importExport() → mirror
@@ -19,17 +19,12 @@
  *                        scaffold — see login.ts).
  */
 
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { type BrowserContext, chromium, type Page } from "playwright-core";
 import { openMirror } from "../../serve/db/open.ts";
 import { importExport } from "../json-export/import.ts";
+import { extractStores, forceLoadAllJournals, incompleteJournals } from "./extract.ts";
+import { automatedLogin, isAuthenticated, waitForAuthenticated } from "./login.ts";
 import { mapStoresToExports } from "./map.ts";
-import {
-  extractStores,
-  computeCompleteness,
-  incompleteJournals,
-  forceLoadAllJournals,
-} from "./extract.ts";
-import { isAuthenticated, waitForAuthenticated, automatedLogin } from "./login.ts";
 
 const APP_URL = process.env.DAYONE_URL ?? "https://dayone.me/";
 const HEADLESS = process.env.DAYONE_HEADLESS !== "0";

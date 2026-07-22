@@ -2,17 +2,12 @@
  * Serving-layer read-query tests, against the imported sample fixture.
  */
 
-import { test, expect, beforeAll } from "bun:test";
-import { readFileSync } from "node:fs";
 import type { Database } from "bun:sqlite";
+import { beforeAll, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { importExport } from "../src/ingest/json-export/import.ts";
 import { openMirror } from "../src/serve/db/open.ts";
-import {
-  listJournals,
-  getEntry,
-  searchEntries,
-  onThisDay,
-} from "../src/serve/queries.ts";
+import { getEntry, listJournals, onThisDay, searchEntries } from "../src/serve/queries.ts";
 import type { DayOneExport } from "../src/types.ts";
 
 const sample = JSON.parse(

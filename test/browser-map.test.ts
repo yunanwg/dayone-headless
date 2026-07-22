@@ -8,11 +8,11 @@
  * check.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { mapStoresToExports } from "../src/ingest/browser/map.ts";
 import { importExport } from "../src/ingest/json-export/import.ts";
 import { openMirror } from "../src/serve/db/open.ts";
-import { listJournals, searchEntries, getEntry } from "../src/serve/queries.ts";
+import { getEntry, listJournals, searchEntries } from "../src/serve/queries.ts";
 
 // A fixed epoch (ms) and its known ISO value. The mapper strips milliseconds to
 // match Day One's export format (`…00Z`, not `…00.000Z`) — recon Q5.
@@ -189,11 +189,9 @@ test("moments group onto the right entry, split by kind", () => {
   expect(entry.videos).toHaveLength(1);
   expect(entry.audios).toHaveLength(1);
   // The orphan moment (entry_id for a non-existent entry) did not attach.
-  const ids = [
-    ...(entry.photos ?? []),
-    ...(entry.videos ?? []),
-    ...(entry.audios ?? []),
-  ].map((m) => m.identifier);
+  const ids = [...(entry.photos ?? []), ...(entry.videos ?? []), ...(entry.audios ?? [])].map(
+    (m) => m.identifier,
+  );
   expect(ids).not.toContain("ORPHANMOMENT0000000000000000000001");
 });
 
@@ -271,9 +269,7 @@ test("integration: mapper output imports into a real in-memory mirror", () => {
   expect(got!.timeZone).toBe("Europe/Paris");
 
   // Media landed in the mirror (photo + video + audio = 3 rows).
-  const mediaCount = (
-    db.query("SELECT COUNT(*) n FROM media").get() as { n: number }
-  ).n;
+  const mediaCount = (db.query("SELECT COUNT(*) n FROM media").get() as { n: number }).n;
   expect(mediaCount).toBe(3);
 
   // FTS search finds the body text.

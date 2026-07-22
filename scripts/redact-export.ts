@@ -38,13 +38,7 @@ import type { DayOneExport } from "../src/types.ts";
 // ── Field classification ────────────────────────────────────────────────────
 
 /** Identifiers -> deterministic hex of the same length (referential integrity). */
-const HEX_KEYS = new Set([
-  "uuid",
-  "identifier",
-  "md5",
-  "appleCloudIdentifier",
-  "filename",
-]);
+const HEX_KEYS = new Set(["uuid", "identifier", "md5", "appleCloudIdentifier", "filename"]);
 
 /** Coordinates -> deterministic dummy numbers. */
 const COORD_KEYS = new Set(["latitude", "longitude", "altitude"]);
@@ -182,15 +176,12 @@ function redactText(input: string): string {
   // Match Unicode letters/numbers (NOT just ASCII) so CJK, accented Latin, etc.
   // are redacted too — real journals are multilingual. Punctuation/whitespace is
   // preserved to keep shape; `dayone-moment://<id>` refs are mapped, not loremed.
-  return input.replace(
-    /dayone-moment:\/\/[A-Za-z0-9._-]+|[\p{L}\p{N}]+/gu,
-    (m) => {
-      if (m.startsWith(MOMENT_PREFIX)) {
-        return MOMENT_PREFIX + mapHex(m.slice(MOMENT_PREFIX.length));
-      }
-      return loremRun(m);
-    },
-  );
+  return input.replace(/dayone-moment:\/\/[A-Za-z0-9._-]+|[\p{L}\p{N}]+/gu, (m) => {
+    if (m.startsWith(MOMENT_PREFIX)) {
+      return MOMENT_PREFIX + mapHex(m.slice(MOMENT_PREFIX.length));
+    }
+    return loremRun(m);
+  });
 }
 
 /** Deterministic dummy coordinate in the plausible range for its axis. */
@@ -279,8 +270,6 @@ if (import.meta.main) {
   }
   const data = (await Bun.file(inPath).json()) as DayOneExport;
   const redacted = redactExport(data);
-  await Bun.write(outPath, JSON.stringify(redacted, null, 2) + "\n");
-  console.error(
-    `redacted "${inPath}" -> "${outPath}" (${redacted.entries?.length ?? 0} entries)`,
-  );
+  await Bun.write(outPath, `${JSON.stringify(redacted, null, 2)}\n`);
+  console.error(`redacted "${inPath}" -> "${outPath}" (${redacted.entries?.length ?? 0} entries)`);
 }

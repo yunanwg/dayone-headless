@@ -1,5 +1,5 @@
 /**
- * Tier A extractor — pull the decrypted DODexie stores out of a driven Day One
+ * Browser extractor — pull the decrypted DODexie stores out of a driven Day One
  * web app, with a completeness gate so we never ship a partial mirror.
  *
  * The browser functions run against a Playwright `Page` already authenticated and
@@ -28,34 +28,40 @@ export interface DODexieDump {
 const DUMP_STORES = ["entries", "moments", "journals", "tags", "entry_counts_cache"] as const;
 
 /**
- * Dump the Tier-A stores from the page's `DODexie` IndexedDB. Runs entirely
+ * Dump the DODexie stores from the page's `DODexie` IndexedDB. Runs entirely
  * in-page (this is the exact read proven during Phase 0 recon), so only plain
  * JSON crosses back — no live handles.
  */
 export async function extractStores(page: Page): Promise<DODexieDump> {
-  const dump = await page.evaluate(async (storeNames: string[]) => {
-    const db: IDBDatabase = await new Promise((res, rej) => {
-      const q = indexedDB.open("DODexie");
-      q.onsuccess = () => res(q.result);
-      q.onerror = () => rej(q.error);
-    });
-    const readAll = (store: string) =>
-      new Promise<any[]>((res) => {
-        const out: any[] = [];
-        const cur = db.transaction(store, "readonly").objectStore(store).openCursor();
-        cur.onsuccess = () => {
-          const c = cur.result;
-          if (c) { out.push(c.value); c.continue(); } else res(out);
-        };
-        cur.onerror = () => res(out);
+  const dump = await page.evaluate(
+    async (storeNames: string[]) => {
+      const db: IDBDatabase = await new Promise((res, rej) => {
+        const q = indexedDB.open("DODexie");
+        q.onsuccess = () => res(q.result);
+        q.onerror = () => rej(q.error);
       });
-    const result: Record<string, any[]> = {};
-    for (const s of storeNames) {
-      result[s] = db.objectStoreNames.contains(s) ? await readAll(s) : [];
-    }
-    db.close();
-    return result;
-  }, DUMP_STORES as unknown as string[]);
+      const readAll = (store: string) =>
+        new Promise<any[]>((res) => {
+          const out: any[] = [];
+          const cur = db.transaction(store, "readonly").objectStore(store).openCursor();
+          cur.onsuccess = () => {
+            const c = cur.result;
+            if (c) {
+              out.push(c.value);
+              c.continue();
+            } else res(out);
+          };
+          cur.onerror = () => res(out);
+        });
+      const result: Record<string, any[]> = {};
+      for (const s of storeNames) {
+        result[s] = db.objectStoreNames.contains(s) ? await readAll(s) : [];
+      }
+      db.close();
+      return result;
+    },
+    DUMP_STORES as unknown as string[],
+  );
   return dump as unknown as DODexieDump;
 }
 

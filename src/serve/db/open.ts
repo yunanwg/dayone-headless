@@ -11,10 +11,7 @@ export const DEFAULT_MIRROR = process.env.DAYONE_MIRROR ?? "mirror.db";
  * Open the mirror and ensure the schema exists. The serving layer opens it
  * read-only by default; the importer passes `writable: true`.
  */
-export function openMirror(
-  path = DEFAULT_MIRROR,
-  opts: { writable?: boolean } = {},
-): Database {
+export function openMirror(path = DEFAULT_MIRROR, opts: { writable?: boolean } = {}): Database {
   const db = new Database(path, {
     readonly: !opts.writable,
     create: opts.writable === true,

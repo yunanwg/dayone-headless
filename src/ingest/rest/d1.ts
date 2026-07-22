@@ -15,7 +15,7 @@
  */
 
 import { gunzipSync } from "node:zlib";
-import { rsaUnwrap, importAesKey, deriveMasterAesKey } from "./crypto.ts";
+import { deriveMasterAesKey, importAesKey, rsaUnwrap } from "./crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
 const td = new TextDecoder();
@@ -39,19 +39,25 @@ export function parseD1(b: Uint8Array): D1Envelope {
   let fingerprint: Uint8Array | undefined;
   let lockedKey: Uint8Array | undefined;
   if (type !== 0) {
-    fingerprint = b.slice(off, off + 32); off += 32;
-    const sigLen = (b[off]! << 8) | b[off + 1]!; off += 2;
+    fingerprint = b.slice(off, off + 32);
+    off += 32;
+    const sigLen = (b[off]! << 8) | b[off + 1]!;
+    off += 2;
     off += sigLen; // signature (unused for decryption)
-    lockedKey = b.slice(off, off + 256); off += 256;
+    lockedKey = b.slice(off, off + 256);
+    off += 256;
   }
-  const iv = b.slice(off, off + 12); off += 12;
+  const iv = b.slice(off, off + 12);
+  off += 12;
   const body = b.slice(off, b.length - MD5_LEN); // strip trailing md5; keep ct ‖ tag
   return { type, iv, body, lockedKey, fingerprint };
 }
 
 async function aesGcm(keyRaw: Uint8Array, iv: Uint8Array, body: Uint8Array): Promise<Uint8Array> {
   const key = await importAesKey(keyRaw as BufferSource);
-  return new Uint8Array(await subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, body as BufferSource));
+  return new Uint8Array(
+    await subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, body as BufferSource),
+  );
 }
 
 function pemToDer(pem: string): Uint8Array {
@@ -71,10 +77,19 @@ export function maybeGunzip(u: Uint8Array): Uint8Array {
  * raw key) → imported RSA-OAEP/SHA-1 key. Used for both the journal content key
  * (AES key = vault key) and the user key (AES key = K_pass from the master key).
  */
-export async function decryptD1PrivateKey(aesKeyRaw: Uint8Array, encryptedPrivateKey: Uint8Array): Promise<CryptoKey> {
+export async function decryptD1PrivateKey(
+  aesKeyRaw: Uint8Array,
+  encryptedPrivateKey: Uint8Array,
+): Promise<CryptoKey> {
   const d = parseD1(encryptedPrivateKey);
   const pem = td.decode(await aesGcm(aesKeyRaw, d.iv, d.body)); // PKCS#8 PEM
-  return subtle.importKey("pkcs8", pemToDer(pem) as BufferSource, { name: "RSA-OAEP", hash: "SHA-1" }, false, ["decrypt"]);
+  return subtle.importKey(
+    "pkcs8",
+    pemToDer(pem) as BufferSource,
+    { name: "RSA-OAEP", hash: "SHA-1" },
+    false,
+    ["decrypt"],
+  );
 }
 
 /** The journal content private key: D1 type-00, unlocked by the vault key. */
@@ -85,7 +100,10 @@ export const decryptJournalPrivateKey = decryptD1PrivateKey;
  * then decrypt the type-00 `encryptedPrivateKey` (from `GET /api/users/key`). This
  * is the pure-passphrase path — no cached key, no browser.
  */
-export async function decryptUserPrivateKey(masterKey: string, encryptedPrivateKey: Uint8Array): Promise<CryptoKey> {
+export async function decryptUserPrivateKey(
+  masterKey: string,
+  encryptedPrivateKey: Uint8Array,
+): Promise<CryptoKey> {
   const { keyRaw } = await deriveMasterAesKey(masterKey);
   return decryptD1PrivateKey(keyRaw, encryptedPrivateKey);
 }
@@ -100,7 +118,10 @@ export function entryD1Body(blob: Uint8Array): Uint8Array {
  * Decrypt one entry's content (D1 type 0x02) given the journal private key.
  * Returns the (un-gzipped) plaintext bytes.
  */
-export async function decryptEntryContent(journalPriv: CryptoKey, entryBlob: Uint8Array): Promise<Uint8Array> {
+export async function decryptEntryContent(
+  journalPriv: CryptoKey,
+  entryBlob: Uint8Array,
+): Promise<Uint8Array> {
   const d = parseD1(entryD1Body(entryBlob));
   if (!d.lockedKey) throw new Error(`entry D1 type ${d.type} has no lockedKey`);
   const contentKey = await rsaUnwrap(journalPriv, d.lockedKey as BufferSource);

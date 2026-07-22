@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Tier C — run the full env-only pipeline (no browser) and report what decrypted.
+ * the REST ingester — run the full env-only pipeline (no browser) and report what decrypted.
  * Prints counts and lengths only, never entry content.
  *
  *   DAYONE_ENCRYPTION_KEY   the "D1-<userId>-<code…>" encryption key (required)
@@ -10,7 +10,7 @@
  *   bun run src/ingest/rest/run.ts
  */
 
-import { DayOneApi, apiConfigFromEnv } from "./api.ts";
+import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { TierCReader } from "./reader.ts";
 
 const masterKey = process.env.DAYONE_ENCRYPTION_KEY;
@@ -31,10 +31,13 @@ for (const j of keys.journals) {
   let n = 0;
   for await (const e of reader.decryptJournal(j.id, keys)) {
     n++;
-    if (n === 1) console.error(`  [${j.name ?? j.id}] sample entry ${e.entryId}: ${e.content.length} chars decrypted`);
+    if (n === 1)
+      console.error(`  [${j.name ?? j.id}] sample entry ${e.entryId}: ${e.content.length} chars decrypted`);
     if (n >= maxPerJournal) break;
   }
   total += n;
-  console.error(`  journal ${j.name ?? j.id}: ${n} entries decrypted${n >= maxPerJournal ? " (capped)" : ""}`);
+  console.error(
+    `  journal ${j.name ?? j.id}: ${n} entries decrypted${n >= maxPerJournal ? " (capped)" : ""}`,
+  );
 }
 console.error(`done — ${total} entries decrypted from env alone, no browser`);

@@ -20,6 +20,18 @@ export interface EntrySummary {
   snippet: string | null;
 }
 
+/** When the mirror was last synced (ISO-8601), or null if unknown/never. */
+export function getSyncedAt(db: Database): string | null {
+  try {
+    const row = db.query("SELECT value FROM meta WHERE key = 'synced_at'").get() as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  } catch {
+    return null; // meta table absent (old mirror)
+  }
+}
+
 export function listJournals(db: Database): JournalRow[] {
   return db
     .query(
@@ -31,9 +43,7 @@ export function listJournals(db: Database): JournalRow[] {
 }
 
 export function getEntry(db: Database, uuid: string): Record<string, unknown> | null {
-  const row = db.query(`SELECT raw FROM entry WHERE uuid = ?`).get(uuid) as
-    | { raw: string }
-    | null;
+  const row = db.query(`SELECT raw FROM entry WHERE uuid = ?`).get(uuid) as { raw: string } | null;
   return row ? (JSON.parse(row.raw) as Record<string, unknown>) : null;
 }
 

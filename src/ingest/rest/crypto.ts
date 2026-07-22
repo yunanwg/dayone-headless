@@ -1,5 +1,5 @@
 /**
- * Tier C crypto primitives — a from-scratch reimplementation of Day One's E2EE,
+ * REST crypto primitives — a from-scratch reimplementation of Day One's E2EE,
  * using WebCrypto (available in bun/Node/browser). These are the primitives
  * captured by CDP recon (docs/protocol.md) and the RSA-OAEP unwrap +
  * fingerprint have been validated byte-identical against the app's own vault
@@ -60,16 +60,26 @@ export async function aesGcmDecryptEnvelope(key: CryptoKey, envelope: Uint8Array
 }
 
 /** AES-256-GCM decrypt with an explicit iv (when iv is carried out-of-band). */
-export async function aesGcmDecrypt(key: CryptoKey, iv: BufferSource, ctPlusTag: BufferSource): Promise<Uint8Array> {
+export async function aesGcmDecrypt(
+  key: CryptoKey,
+  iv: BufferSource,
+  ctPlusTag: BufferSource,
+): Promise<Uint8Array> {
   return new Uint8Array(await subtle.decrypt({ name: "AES-GCM", iv }, key, ctPlusTag));
 }
 
 /**
  * Derive K_pass from the passphrase (PBKDF2 → AES-256-GCM key). This unwraps the
- * user's RSA private key, removing the need for the cached copy (Tier C path #1).
+ * user's RSA private key, removing the need for the cached copy (the passphrase path).
  */
 export async function derivePassphraseKey(passphrase: string, salt: BufferSource): Promise<CryptoKey> {
-  const base = await subtle.importKey("raw", new TextEncoder().encode(passphrase), { name: "PBKDF2" }, false, ["deriveKey"]);
+  const base = await subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"],
+  );
   return subtle.deriveKey(
     { name: "PBKDF2", salt, iterations: PARAMS.pbkdf2.iterations, hash: PARAMS.pbkdf2.hash },
     base,
@@ -79,7 +89,10 @@ export async function derivePassphraseKey(passphrase: string, salt: BufferSource
   );
 }
 
-export interface MasterKeyParts { userId: string; passwordBytes: Uint8Array; }
+export interface MasterKeyParts {
+  userId: string;
+  passwordBytes: Uint8Array;
+}
 
 /**
  * Parse Day One's master "encryption key" — the `D1-<userId>-<code…>` string the
@@ -101,9 +114,16 @@ export function parseMasterKey(masterKey: string): MasterKeyParts {
  */
 export async function deriveMasterAesKey(masterKey: string): Promise<{ userId: string; keyRaw: Uint8Array }> {
   const { userId, passwordBytes } = parseMasterKey(masterKey);
-  const base = await subtle.importKey("raw", passwordBytes as BufferSource, { name: "PBKDF2" }, false, ["deriveBits"]);
+  const base = await subtle.importKey("raw", passwordBytes as BufferSource, { name: "PBKDF2" }, false, [
+    "deriveBits",
+  ]);
   const bits = await subtle.deriveBits(
-    { name: "PBKDF2", salt: new TextEncoder().encode(userId) as BufferSource, iterations: PARAMS.pbkdf2.iterations, hash: PARAMS.pbkdf2.hash },
+    {
+      name: "PBKDF2",
+      salt: new TextEncoder().encode(userId) as BufferSource,
+      iterations: PARAMS.pbkdf2.iterations,
+      hash: PARAMS.pbkdf2.hash,
+    },
     base,
     PARAMS.aes.keyBits,
   );

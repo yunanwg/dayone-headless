@@ -3,24 +3,43 @@
  * blobs the way Day One does, then assert our parser/decryptor recovers them.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
-import { parseD1, decryptJournalPrivateKey, decryptUserPrivateKey, decryptEntryContent, entryD1Body, maybeGunzip } from "../src/ingest/rest/d1.ts";
-import { parseMasterKey, deriveMasterAesKey } from "../src/ingest/rest/crypto.ts";
+import { deriveMasterAesKey, parseMasterKey } from "../src/ingest/rest/crypto.ts";
+import {
+  decryptEntryContent,
+  decryptJournalPrivateKey,
+  decryptUserPrivateKey,
+  entryD1Body,
+  maybeGunzip,
+  parseD1,
+} from "../src/ingest/rest/d1.ts";
 
 const subtle = globalThis.crypto.subtle;
-const cat = (...a: Uint8Array[]) => { const n = a.reduce((s, x) => s + x.length, 0); const o = new Uint8Array(n); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
+const cat = (...a: Uint8Array[]) => {
+  const n = a.reduce((s, x) => s + x.length, 0);
+  const o = new Uint8Array(n);
+  let p = 0;
+  for (const x of a) {
+    o.set(x, p);
+    p += x.length;
+  }
+  return o;
+};
 const bytes = (...n: number[]) => new Uint8Array(n);
 const rand = (n: number) => crypto.getRandomValues(new Uint8Array(n));
 
 async function gcmEncrypt(keyRaw: Uint8Array, iv: Uint8Array, pt: Uint8Array): Promise<Uint8Array> {
   const k = await subtle.importKey("raw", keyRaw as BufferSource, { name: "AES-GCM" }, false, ["encrypt"]);
-  return new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, k, pt as BufferSource)); // ct ‖ tag
+  return new Uint8Array(
+    await subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, k, pt as BufferSource),
+  ); // ct ‖ tag
 }
 async function genRsa() {
   return (await subtle.generateKey(
     { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-1" },
-    true, ["encrypt", "decrypt"],
+    true,
+    ["encrypt", "decrypt"],
   )) as CryptoKeyPair;
 }
 async function toPem(priv: CryptoKey): Promise<string> {
@@ -31,14 +50,16 @@ async function toPem(priv: CryptoKey): Promise<string> {
 const md5pad = bytes(...new Array(16).fill(0)); // parser strips it; content irrelevant
 
 test("parseD1 slices type-00 and type-02 layouts correctly", () => {
-  const iv = rand(12), body = rand(40);
+  const iv = rand(12),
+    body = rand(40);
   const t0 = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, body, md5pad);
   const p0 = parseD1(t0);
   expect(p0.type).toBe(0);
   expect([...p0.iv]).toEqual([...iv]);
   expect([...p0.body]).toEqual([...body]);
 
-  const fp = rand(32), locked = rand(256);
+  const fp = rand(32),
+    locked = rand(256);
   const t2 = cat(bytes(0x44, 0x31, 0x01, 0x02), fp, bytes(0x00, 0x00), locked, iv, body, md5pad);
   const p2 = parseD1(t2);
   expect(p2.type).toBe(2);
@@ -69,7 +90,15 @@ test("decryptEntryContent (type-02) recovers plaintext, incl. gzip + JSON-header
   const iv = rand(12);
   const known = "tierc-synthetic-entry-plaintext-日记";
   const gz = new Uint8Array(gzipSync(new TextEncoder().encode(known)));
-  const d1 = cat(bytes(0x44, 0x31, 0x01, 0x02), rand(32), bytes(0, 0), lockedKey, iv, await gcmEncrypt(contentKey, iv, gz), md5pad);
+  const d1 = cat(
+    bytes(0x44, 0x31, 0x01, 0x02),
+    rand(32),
+    bytes(0, 0),
+    lockedKey,
+    iv,
+    await gcmEncrypt(contentKey, iv, gz),
+    md5pad,
+  );
   // Prepend a JSON header ‖ \n like getEntryContent() returns.
   const blob = cat(new TextEncoder().encode('{"revision":{"entryId":"X"}}'), bytes(0x0a), d1);
 

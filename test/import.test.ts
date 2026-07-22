@@ -3,7 +3,7 @@
  * mirror is populated the way the serving layer expects.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { importExport } from "../src/ingest/json-export/import.ts";
 import { openMirror } from "../src/serve/db/open.ts";
@@ -26,8 +26,7 @@ test("imports entries, media and distinct tags with the right counts", () => {
   expect(stats.media).toBe(1);
   expect(stats.tags).toBe(4); // travel, paris, code, homelab
 
-  const count = (sql: string) =>
-    (db.query(sql).get() as { n: number }).n;
+  const count = (sql: string) => (db.query(sql).get() as { n: number }).n;
   expect(count("SELECT COUNT(*) n FROM entry")).toBe(3);
   expect(count("SELECT COUNT(*) n FROM media")).toBe(1);
   expect(count("SELECT COUNT(*) n FROM tag")).toBe(4);
@@ -57,9 +56,9 @@ test("isPinned maps to the pinned column", () => {
   };
   const db = freshMirror();
   importExport(db, pinnedFixture, "pinned");
-  const row = db
-    .query("SELECT pinned FROM entry WHERE uuid = ?")
-    .get("PINNED00000000000000000000000001") as { pinned: number };
+  const row = db.query("SELECT pinned FROM entry WHERE uuid = ?").get("PINNED00000000000000000000000001") as {
+    pinned: number;
+  };
   expect(row.pinned).toBe(1);
   db.close();
 });
@@ -81,9 +80,9 @@ test("FTS is populated for every entry with body text", () => {
   importExport(db, sample, "sample");
   const n = (db.query("SELECT COUNT(*) n FROM entry_fts").get() as { n: number }).n;
   expect(n).toBe(3);
-  const hit = db
-    .query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH ?")
-    .get("debugging") as { uuid: string } | null;
+  const hit = db.query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH ?").get("debugging") as {
+    uuid: string;
+  } | null;
   expect(hit?.uuid).toBe("EEEE5555FFFF6666GGGG7777HHHH8888");
   db.close();
 });

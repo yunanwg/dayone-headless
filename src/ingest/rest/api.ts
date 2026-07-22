@@ -1,5 +1,5 @@
 /**
- * Tier C REST client — pure `fetch`, no browser. Talks to Day One's sync API with
+ * REST client — pure `fetch`, no browser. Talks to Day One's sync API with
  * a 32-char bearer token. Ciphertext in; decryption is crypto.ts + d1.ts.
  *
  * Auth: every request needs `authorization: <token>` plus `x-user-agent` and
@@ -52,7 +52,8 @@ export function apiConfigFromEnv(): DayOneApiConfig {
     throw new Error("provide DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD to mint one");
   }
   const xUserAgent = process.env.DAYONE_X_USER_AGENT || DEFAULT_X_USER_AGENT;
-  const deviceInfo = process.env.DAYONE_DEVICE_INFO || buildDeviceInfo(process.env.DAYONE_DEVICE_ID || randomHex(16));
+  const deviceInfo =
+    process.env.DAYONE_DEVICE_INFO || buildDeviceInfo(process.env.DAYONE_DEVICE_ID || randomHex(16));
   return { token, xUserAgent, deviceInfo, credentials: email && password ? { email, password } : undefined };
 }
 
@@ -85,6 +86,7 @@ export interface FeedItem {
   revision: {
     entryId: string; // 32-hex — the JSON-export uuid
     journalId: string;
+    revisionId: number; // bumps on every edit — the incremental-sync key
     editDate: number;
     saveDate: number;
     moments: unknown[];
@@ -116,7 +118,11 @@ export class DayOneApi {
   }
   private renew(): Promise<string> {
     if (!this.cfg.credentials) throw new Error("token missing/expired and no credentials to renew");
-    return login(this.cfg.credentials, { baseUrl: this.cfg.baseUrl, xUserAgent: this.cfg.xUserAgent, deviceInfo: this.cfg.deviceInfo });
+    return login(this.cfg.credentials, {
+      baseUrl: this.cfg.baseUrl,
+      xUserAgent: this.cfg.xUserAgent,
+      deviceInfo: this.cfg.deviceInfo,
+    });
   }
 
   /** Fetch with one automatic token-renewal + retry on 401 (if credentials are set). */
@@ -143,7 +149,13 @@ export class DayOneApi {
     return (await r.text())
       .split("\n")
       .filter((l) => l.trim())
-      .map((l) => { try { return JSON.parse(l) as FeedItem; } catch { return null; } })
+      .map((l) => {
+        try {
+          return JSON.parse(l) as FeedItem;
+        } catch {
+          return null;
+        }
+      })
       .filter((x): x is FeedItem => x !== null && !!x.revision?.entryId);
   }
 

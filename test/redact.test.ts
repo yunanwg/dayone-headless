@@ -3,7 +3,7 @@
  * real journal content — per the project's privacy rule.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { redactExport } from "../scripts/redact-export.ts";
 import type { DayOneExport } from "../src/types.ts";
 
@@ -26,7 +26,8 @@ function makeSynthetic(): DayOneExport {
         creationDate: "2021-07-22T08:30:00Z",
         modifiedDate: "2021-07-22T09:00:00Z",
         timeZone: "Europe/Paris",
-        text: "# Morning in Paris\n\nCoffee by the Seine.\n\n![](dayone-moment://" +
+        text:
+          "# Morning in Paris\n\nCoffee by the Seine.\n\n![](dayone-moment://" +
           MEDIA_ID +
           ")\n\n- item one\n- item two",
         richText,
@@ -101,7 +102,9 @@ function assertSameStructure(orig: unknown, red: unknown, path = "$"): void {
     expect(Array.isArray(red), `${path} array-ness`).toBe(true);
     const r = red as unknown[];
     expect(r.length, `${path} length`).toBe(orig.length);
-    orig.forEach((el, i) => assertSameStructure(el, r[i], `${path}[${i}]`));
+    orig.forEach((el, i) => {
+      assertSameStructure(el, r[i], `${path}[${i}]`);
+    });
     return;
   }
   if (orig !== null && typeof orig === "object") {
@@ -149,8 +152,7 @@ test("richText stays a valid { meta, contents } JSON string, content redacted", 
   const textNode = rt.contents[0] as { text: string };
   expect(textNode.text).not.toBe("A private sentence about someone.");
   // …and its embedded identifier is mapped consistently with the photo.
-  const embed = (rt.contents[1] as { embeddedObjects: Array<{ identifier: string }> })
-    .embeddedObjects[0]!;
+  const embed = (rt.contents[1] as { embeddedObjects: Array<{ identifier: string }> }).embeddedObjects[0]!;
   expect(embed.identifier).toBe(out.entries[0]!.photos![0]!.identifier);
 });
 
@@ -190,8 +192,7 @@ test("private / identifying leaves are changed", () => {
   expect(rp.appleCloudIdentifier).not.toBe("CLOUDID12345");
 
   // Unmodeled/private Record leaf is default-denied (redacted).
-  const activity = (re as unknown as { userActivity: { activityName: string } })
-    .userActivity.activityName;
+  const activity = (re as unknown as { userActivity: { activityName: string } }).userActivity.activityName;
   expect(activity).not.toBe("Reading a private book title");
 });
 

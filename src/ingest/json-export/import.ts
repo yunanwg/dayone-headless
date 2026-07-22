@@ -3,16 +3,16 @@
  *
  * The simplest possible ingester: reads a hand-exported Day One JSON file and
  * writes it into the mirror. It shares the mirror contract with the fancy
- * (Tier A/C) ingesters but needs no Day One, browser, or crypto — so Phase 1
+ * (the browser ingester/C) ingesters but needs no Day One, browser, or crypto — so Phase 1
  * (serving layer) can be validated end-to-end against real data today.
  *
  * Usage:  bun run src/ingest/json-export/import.ts <export.json> [journalName]
  */
 
-import { basename } from "node:path";
 import type { Database } from "bun:sqlite";
+import { basename } from "node:path";
 import { openMirror } from "../../serve/db/open.ts";
-import type { DayOneExport, DayOneEntry, DayOneMedia } from "../../types.ts";
+import type { DayOneEntry, DayOneExport, DayOneMedia } from "../../types.ts";
 
 interface ImportStats {
   journal: string;
@@ -21,19 +21,13 @@ interface ImportStats {
   tags: number;
 }
 
-export function importExport(
-  db: Database,
-  data: DayOneExport,
-  journalName: string,
-): ImportStats {
+export function importExport(db: Database, data: DayOneExport, journalName: string): ImportStats {
   const insertJournal = db.query(
     `INSERT INTO journal (name, export_version) VALUES (?, ?)
      ON CONFLICT(name) DO UPDATE SET export_version = excluded.export_version
      RETURNING id`,
   );
-  const journalId = (
-    insertJournal.get(journalName, data.metadata?.version ?? null) as { id: number }
-  ).id;
+  const journalId = (insertJournal.get(journalName, data.metadata?.version ?? null) as { id: number }).id;
 
   const insertEntry = db.query(`
     INSERT INTO entry (
@@ -51,19 +45,20 @@ export function importExport(
       creation_date = excluded.creation_date, modified_date = excluded.modified_date,
       text = excluded.text, rich_text = excluded.rich_text, raw = excluded.raw
   `);
-  const insertTag = db.query(
-    `INSERT INTO tag (name) VALUES (?) ON CONFLICT(name) DO NOTHING RETURNING id`,
-  );
+  const insertTag = db.query(`INSERT INTO tag (name) VALUES (?) ON CONFLICT(name) DO NOTHING RETURNING id`);
   const getTagId = db.query(`SELECT id FROM tag WHERE name = ?`);
-  const linkTag = db.query(
-    `INSERT INTO entry_tag (entry_uuid, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
-  );
+  const linkTag = db.query(`INSERT INTO entry_tag (entry_uuid, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING`);
   const insertMedia = db.query(`
     INSERT INTO media (identifier, entry_uuid, kind, md5, type, order_in_entry, raw)
     VALUES ($identifier, $entry_uuid, $kind, $md5, $type, $order_in_entry, $raw)
     ON CONFLICT(identifier) DO UPDATE SET raw = excluded.raw
   `);
   const insertFts = db.query(`INSERT INTO entry_fts (uuid, text) VALUES (?, ?)`);
+  // Idempotency: clear an entry's derived rows before re-inserting, so re-imports
+  // (full re-runs or incremental re-sync) never duplicate fts/media/tag links.
+  const delFts = db.query(`DELETE FROM entry_fts WHERE uuid = ?`);
+  const delMedia = db.query(`DELETE FROM media WHERE entry_uuid = ?`);
+  const delEntryTags = db.query(`DELETE FROM entry_tag WHERE entry_uuid = ?`);
 
   const stats: ImportStats = { journal: journalName, entries: 0, media: 0, tags: 0 };
   const tagsSeen = new Set<string>();
@@ -93,18 +88,26 @@ export function importExport(
       });
       stats.entries++;
 
+      delFts.run(e.uuid);
       if (e.text) insertFts.run(e.uuid, e.text);
 
+      delEntryTags.run(e.uuid);
       for (const name of e.tags ?? []) {
         insertTag.run(name);
         const tagId = (getTagId.get(name) as { id: number }).id;
         linkTag.run(e.uuid, tagId);
-        if (!tagsSeen.has(name)) { tagsSeen.add(name); stats.tags++; }
+        if (!tagsSeen.has(name)) {
+          tagsSeen.add(name);
+          stats.tags++;
+        }
       }
 
+      delMedia.run(e.uuid);
       const kinds: [keyof DayOneEntry, string][] = [
-        ["photos", "photo"], ["videos", "video"],
-        ["audios", "audio"], ["pdfAttachments", "pdf"],
+        ["photos", "photo"],
+        ["videos", "video"],
+        ["audios", "audio"],
+        ["pdfAttachments", "pdf"],
       ];
       for (const [field, kind] of kinds) {
         for (const m of (e[field] as DayOneMedia[] | undefined) ?? []) {

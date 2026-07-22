@@ -4,7 +4,7 @@
  * IndexedDB-shaped records only.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { mapStoresToExports } from "../src/ingest/browser/map.ts";
 
 function entryRec(over: Record<string, any> = {}): Record<string, any> {

@@ -1,5 +1,5 @@
 /**
- * Tier A auth — get the driven browser into an authenticated, journals-decrypted
+ * Browser auth — get the driven browser into an authenticated, journals-decrypted
  * state, WITHOUT this code ever owning the secrets.
  *
  * Two paths:

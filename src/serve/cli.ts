@@ -12,7 +12,7 @@
  */
 
 import { openMirror } from "./db/open.ts";
-import { listJournals, getEntry, searchEntries, onThisDay } from "./queries.ts";
+import { getEntry, listJournals, onThisDay, searchEntries } from "./queries.ts";
 
 function todayMonthDay(): string {
   // Local date, "MM-DD".
@@ -21,7 +21,7 @@ function todayMonthDay(): string {
 }
 
 function out(value: unknown): void {
-  process.stdout.write(JSON.stringify(value, null, 2) + "\n");
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -33,15 +33,24 @@ switch (cmd) {
     break;
   case "get": {
     const uuid = rest[0];
-    if (!uuid) { console.error("usage: dayone get <uuid>"); process.exit(1); }
+    if (!uuid) {
+      console.error("usage: dayone get <uuid>");
+      process.exit(1);
+    }
     const entry = getEntry(db, uuid);
-    if (!entry) { console.error(`no entry: ${uuid}`); process.exit(2); }
+    if (!entry) {
+      console.error(`no entry: ${uuid}`);
+      process.exit(2);
+    }
     out(entry);
     break;
   }
   case "search": {
     const query = rest[0];
-    if (!query) { console.error("usage: dayone search <query> [limit]"); process.exit(1); }
+    if (!query) {
+      console.error("usage: dayone search <query> [limit]");
+      process.exit(1);
+    }
     out(searchEntries(db, query, rest[1] ? Number(rest[1]) : undefined));
     break;
   }
@@ -49,9 +58,7 @@ switch (cmd) {
     out(onThisDay(db, rest[0] ?? todayMonthDay()));
     break;
   default:
-    console.error(
-      "commands: journals | get <uuid> | search <query> [limit] | on-this-day [MM-DD]",
-    );
+    console.error("commands: journals | get <uuid> | search <query> [limit] | on-this-day [MM-DD]");
     process.exit(1);
 }
 

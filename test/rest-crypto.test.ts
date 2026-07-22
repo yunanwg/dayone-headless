@@ -5,10 +5,15 @@
  * session), not here.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import {
-  PARAMS, keyFingerprint, rsaUnwrap, importAesKey,
-  aesGcmDecryptEnvelope, aesGcmDecrypt, derivePassphraseKey,
+  aesGcmDecrypt,
+  aesGcmDecryptEnvelope,
+  derivePassphraseKey,
+  importAesKey,
+  keyFingerprint,
+  PARAMS,
+  rsaUnwrap,
 } from "../src/ingest/rest/crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
@@ -16,7 +21,8 @@ const subtle = globalThis.crypto.subtle;
 test("RSA-OAEP/SHA-1 unwrap round-trips a 32-byte key", async () => {
   const kp = (await subtle.generateKey(
     { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-1" },
-    true, ["encrypt", "decrypt"],
+    true,
+    ["encrypt", "decrypt"],
   )) as CryptoKeyPair;
   const vaultKey = crypto.getRandomValues(new Uint8Array(32));
   const wrapped = await subtle.encrypt({ name: "RSA-OAEP" }, kp.publicKey, vaultKey);

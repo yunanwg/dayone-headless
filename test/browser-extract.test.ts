@@ -3,7 +3,7 @@
  * a journal can sit at 0 cached entries until force-loaded). Pure, synthetic.
  */
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { computeCompleteness, incompleteJournals } from "../src/ingest/browser/extract.ts";
 
 function dump(over: Record<string, any> = {}) {

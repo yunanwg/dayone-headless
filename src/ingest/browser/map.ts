@@ -1,7 +1,7 @@
 /**
- * Tier A mapper — IndexedDB (`DODexie`) stores → export-shaped `DayOneExport`.
+ * Browser → export mapper â IndexedDB (`DODexie`) stores â export-shaped `DayOneExport`.
  *
- * The Day One web app caches DECRYPTED plaintext in IndexedDB. Tier A ingestion
+ * The Day One web app caches DECRYPTED plaintext in IndexedDB. the browser ingester
  * extracts four Dexie object stores (`entries`, `moments`, `journals`, `tags`)
  * and this module TRANSLATES them into the JSON-export shape (`DayOneExport`,
  * see `src/types.ts`) so the existing `importExport()` writes them to the mirror
@@ -22,12 +22,12 @@
  */
 
 import type {
-  DayOneExport,
   DayOneEntry,
+  DayOneExport,
   DayOneLocation,
-  DayOneWeather,
   DayOneMedia,
   DayOnePhoto,
+  DayOneWeather,
 } from "../../types.ts";
 
 /** Loose IndexedDB record — the extraction adapter hands us untyped objects. */
@@ -163,7 +163,9 @@ function momentKind(m: Rec): MediaKind {
   if (t === "audio") return "audios";
   if (t === "photo" || t === "image") return "photos";
   // Fallback to the MIME major type when `type` is unexpected/missing.
-  const major = String(m.content_type ?? "").split("/")[0]?.toLowerCase();
+  const major = String(m.content_type ?? "")
+    .split("/")[0]
+    ?.toLowerCase();
   if (major === "video") return "videos";
   if (major === "audio") return "audios";
   return "photos";
@@ -348,7 +350,7 @@ export function mapStoresToExports(stores: {
       // synthetic name so the entries are never dropped.
       journalName: journalName.get(jid) ?? `journal-${String(jid)}`,
       export: {
-        // No export-version field exists in the IndexedDB stores; mark Tier A
+        // No export-version field exists in the IndexedDB stores; mark the browser ingester
         // provenance so the mirror's `journal.export_version` is not fabricated
         // as a real Day One export version.
         metadata: { version: "browser" },
