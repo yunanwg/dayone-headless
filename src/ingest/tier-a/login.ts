@@ -20,7 +20,13 @@
 
 import type { Page } from "playwright-core";
 
-/** True once the app has loaded a decrypted journal (entries present in DODexie). */
+/**
+ * True once the account is signed in and journals are decrypted — signalled by
+ * the `journals` store being populated. NB: a fresh profile syncs the journal
+ * LIST (+ server counts) but downloads NO entries until a journal is selected, so
+ * `entries` is the wrong signal here — `journals > 0` means "logged in, ready to
+ * force-load".
+ */
 export async function isAuthenticated(page: Page): Promise<boolean> {
   return page.evaluate(async () => {
     try {
@@ -31,10 +37,10 @@ export async function isAuthenticated(page: Page): Promise<boolean> {
         q.onsuccess = () => res(q.result);
         q.onerror = () => rej(q.error);
       });
-      const has = db.objectStoreNames.contains("entries");
+      const has = db.objectStoreNames.contains("journals");
       const n = has
         ? await new Promise<number>((res) => {
-            const c = db.transaction("entries", "readonly").objectStore("entries").count();
+            const c = db.transaction("journals", "readonly").objectStore("journals").count();
             c.onsuccess = () => res(c.result);
             c.onerror = () => res(0);
           })

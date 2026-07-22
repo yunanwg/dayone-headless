@@ -50,13 +50,14 @@ async function launch(profileDir: string): Promise<BrowserContext> {
 }
 
 /**
- * App navigation to force a journal's entries to sync into IndexedDB.
- * TODO(recon): confirm the per-journal route/trigger. Until then this reloads the
- * app (which syncs the active journal set); the completeness gate below is the
- * real guarantee — it refuses to write a partial mirror regardless.
+ * Force a journal's entries to sync into IndexedDB by opening its route. Recon
+ * confirmed: navigating to `/journals/<id>` triggers the download of a
+ * not-yet-synced journal (the lazy `J4` filled 0→52 this way). The
+ * completeness gate then polls until its entries actually land.
  */
-async function openJournal(page: Page, _journalId: string): Promise<void> {
-  await page.goto(APP_URL, { waitUntil: "networkidle" }).catch(() => {});
+const base = APP_URL.replace(/\/$/, "");
+async function openJournal(page: Page, journalId: string): Promise<void> {
+  await page.goto(`${base}/journals/${journalId}`, { waitUntil: "networkidle" }).catch(() => {});
 }
 
 async function ensureAuth(page: Page): Promise<void> {

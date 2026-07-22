@@ -55,11 +55,23 @@ write** while any journal is short (`DAYONE_STRICT=1`, default). Deleted rows
   like a private key: gitignored (`profile/`), tight perms, on the ingestion host
   only. Same posture as the master key in the security model.
 
+## Validated end-to-end (2026-07-22)
+
+Full pipeline run on real data, no Mac: headless Chrome-for-Testing (Playwright) →
+decrypted IndexedDB → force-load all journals → gate → map → mirror → CLI. Result
+**byte-matches the official JSON export**: 3577 entries, 2469 media, dates in
+`…Z` (no ms) format. The lazy `J4` filled 0→52 via force-load and passed
+the gate. (Tiny open item: location count 2971 vs export 2970 — reconcile.)
+
+Fresh-profile behavior confirmed: after login the app syncs the **journal list +
+server counts** but downloads **no entries until a journal is selected** — so
+`isAuthenticated` keys off the `journals` store, not `entries`, and
+`forceLoadAllJournals` opens every journal to pull its entries.
+
 ## Open TODOs
 
-1. **`openJournal` route** — the per-journal force-load navigation is a best-effort
-   app reload; confirm the real per-journal route/trigger so lazy journals load
-   deterministically. (The gate makes a wrong guess *safe* — it just blocks the
-   write — but load must actually work for Tier A to complete.)
-2. **`automatedLogin` selectors** — joint recon pass (above).
-3. Verify media/`moments` completeness thresholds (thumbnails/promises may lag).
+1. **`automatedLogin` selectors** — joint recon pass (above). The persistent-profile
+   manual login works today; automation is the remaining piece.
+2. Reconcile the location 2971-vs-2970 off-by-one against the export oracle.
+3. Verify media/`moments` completeness thresholds (thumbnails/promises may lag;
+   the gate deliberately checks entries only).

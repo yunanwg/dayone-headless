@@ -130,15 +130,15 @@ export async function forceLoadAllJournals(
   openJournal: (page: Page, journalId: string) => Promise<void>,
   opts: { timeoutMs?: number; pollMs?: number } = {},
 ): Promise<JournalCompleteness[]> {
-  const timeoutMs = opts.timeoutMs ?? 120_000;
-  const pollMs = opts.pollMs ?? 1_500;
-  const deadline = Date.now() + timeoutMs;
+  const timeoutMs = opts.timeoutMs ?? 180_000; // per journal (a big journal takes a while)
+  const pollMs = opts.pollMs ?? 2_000;
 
   let rows = computeCompleteness(await extractStores(page));
   for (const j of rows) {
     if (j.complete) continue;
     await openJournal(page, j.journalId);
-    // Poll until this journal fills or we run out of time.
+    // Each journal gets its own budget — one large journal must not starve later ones.
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await page.waitForTimeout(pollMs);
       rows = computeCompleteness(await extractStores(page));
