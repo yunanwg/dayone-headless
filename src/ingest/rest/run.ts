@@ -7,7 +7,7 @@
  *   DAYONE_API_TOKEN    a 32-char token, OR DAYONE_EMAIL + DAYONE_PASSWORD to mint one
  *   DAYONE_X_USER_AGENT, DAYONE_DEVICE_INFO   (from a logged-in session for now)
  *
- *   bun run src/ingest/tier-c/run.ts
+ *   bun run src/ingest/rest/run.ts
  */
 
 import { DayOneApi, apiConfigFromEnv } from "./api.ts";

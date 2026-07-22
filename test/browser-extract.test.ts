@@ -4,7 +4,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { computeCompleteness, incompleteJournals } from "../src/ingest/tier-a/extract.ts";
+import { computeCompleteness, incompleteJournals } from "../src/ingest/browser/extract.ts";
 
 function dump(over: Record<string, any> = {}) {
   return {

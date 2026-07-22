@@ -9,7 +9,7 @@ import { test, expect } from "bun:test";
 import {
   PARAMS, keyFingerprint, rsaUnwrap, importAesKey,
   aesGcmDecryptEnvelope, aesGcmDecrypt, derivePassphraseKey,
-} from "../src/ingest/tier-c/crypto.ts";
+} from "../src/ingest/rest/crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
 

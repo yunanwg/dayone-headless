@@ -85,6 +85,6 @@ export async function automatedLogin(_page: Page, creds: Credentials): Promise<v
   throw new Error(
     "automatedLogin: login/decrypt selectors not yet confirmed. Use the persistent-profile " +
       "manual-login flow (run headed once), or complete a joint recon pass to wire this. " +
-      "See docs/tier-a-extractor.md.",
+      "See docs/browser-extractor.md.",
   );
 }

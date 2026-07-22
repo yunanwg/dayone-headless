@@ -1,14 +1,14 @@
 # Tier A extractor — driving the web app to fill the mirror
 
-Pairs with `docs/tier-a-crosswalk.md` (the field mapping). This covers the
+Pairs with `docs/browser-crosswalk.md` (the field mapping). This covers the
 *extraction*: getting the decrypted DODexie stores out of a driven Day One web
 app and into the mirror, safely and completely.
 
 ## Pipeline
 
 ```
-launch persistent Chromium (profile)          src/ingest/tier-a/run.ts
-  → ensure authenticated (passphrase path)     src/ingest/tier-a/login.ts
+launch persistent Chromium (profile)          src/ingest/browser/run.ts
+  → ensure authenticated (passphrase path)     src/ingest/browser/login.ts
   → force-load EVERY journal                   extract.ts:forceLoadAllJournals
   → dump DODexie stores                         extract.ts:extractStores
   → COMPLETENESS GATE (refuse partial)          extract.ts:computeCompleteness

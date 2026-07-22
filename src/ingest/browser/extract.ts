@@ -122,7 +122,7 @@ export function incompleteJournals(rows: JournalCompleteness[]): JournalComplete
  * `entry_counts_cache` vs loaded entries until complete or `timeoutMs` elapses.
  *
  * `openJournal` is the app-navigation step; its exact route/trigger still needs a
- * joint recon pass (see docs/tier-a-extractor.md) — kept injectable so the poll
+ * joint recon pass (see docs/browser-extractor.md) — kept injectable so the poll
  * loop and completeness logic are testable/stable regardless.
  */
 export async function forceLoadAllJournals(

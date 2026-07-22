@@ -11,7 +11,7 @@
  * IndexedDB-shaped records) and returns export objects. The browser/CDP
  * extraction that produces those arrays is a separate adapter.
  *
- * The crosswalk this implements verbatim: `docs/tier-a-crosswalk.md`.
+ * The crosswalk this implements verbatim: `docs/browser-crosswalk.md`.
  *
  * Encoding rules applied throughout:
  *   - case:     IndexedDB is snake_case; the export is camelCase.
@@ -301,7 +301,7 @@ function mapEntry(e: Rec, moments: Rec[]): DayOneEntry {
  * - the journal name comes from `journals[].name` joined on `journals[].id`.
  *
  * `tags` is accepted for signature completeness but not yet wired: the tag store
- * shape is still TBD in recon (`docs/tier-a-crosswalk.md`, open question 4), and
+ * shape is still TBD in recon (`docs/browser-crosswalk.md`, open question 4), and
  * how a tag associates back to an entry is unknown. Left unmapped on purpose
  * rather than guessed — TODO(tags): wire once the store shape is confirmed.
  */
@@ -351,7 +351,7 @@ export function mapStoresToExports(stores: {
         // No export-version field exists in the IndexedDB stores; mark Tier A
         // provenance so the mirror's `journal.export_version` is not fabricated
         // as a real Day One export version.
-        metadata: { version: "tier-a" },
+        metadata: { version: "browser" },
         entries: entryList,
       },
     });

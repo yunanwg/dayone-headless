@@ -1,7 +1,7 @@
 /**
  * Tier C crypto primitives — a from-scratch reimplementation of Day One's E2EE,
  * using WebCrypto (available in bun/Node/browser). These are the primitives
- * captured by CDP recon (docs/tier-c-crypto.md) and the RSA-OAEP unwrap +
+ * captured by CDP recon (docs/protocol.md) and the RSA-OAEP unwrap +
  * fingerprint have been validated byte-identical against the app's own vault
  * fingerprint oracle.
  *
@@ -51,7 +51,7 @@ export function importAesKey(raw32: BufferSource): Promise<CryptoKey> {
  * AES-256-GCM decrypt an envelope laid out as `iv(12) ‖ ciphertext ‖ tag(16)`
  * (WebCrypto expects `ciphertext ‖ tag` as the data and the iv separately).
  * NOTE: the iv/ct/tag concatenation order is the assumed stored layout — confirm
- * against a real blob before trusting (docs/tier-c-crypto.md unknown #5).
+ * against a real blob before trusting (docs/protocol.md unknown #5).
  */
 export async function aesGcmDecryptEnvelope(key: CryptoKey, envelope: Uint8Array): Promise<Uint8Array> {
   const iv = envelope.subarray(0, PARAMS.aes.ivBytes) as BufferSource;

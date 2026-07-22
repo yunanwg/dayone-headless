@@ -9,7 +9,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { mapStoresToExports } from "../src/ingest/tier-a/map.ts";
+import { mapStoresToExports } from "../src/ingest/browser/map.ts";
 import { importExport } from "../src/ingest/json-export/import.ts";
 import { openMirror } from "../src/serve/db/open.ts";
 import { listJournals, searchEntries, getEntry } from "../src/serve/queries.ts";

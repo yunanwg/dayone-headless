@@ -5,7 +5,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { mapStoresToExports } from "../src/ingest/tier-a/map.ts";
+import { mapStoresToExports } from "../src/ingest/browser/map.ts";
 
 function entryRec(over: Record<string, any> = {}): Record<string, any> {
   return {

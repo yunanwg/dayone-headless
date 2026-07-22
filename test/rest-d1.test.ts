@@ -5,8 +5,8 @@
 
 import { test, expect } from "bun:test";
 import { gzipSync } from "node:zlib";
-import { parseD1, decryptJournalPrivateKey, decryptUserPrivateKey, decryptEntryContent, entryD1Body, maybeGunzip } from "../src/ingest/tier-c/d1.ts";
-import { parseMasterKey, deriveMasterAesKey } from "../src/ingest/tier-c/crypto.ts";
+import { parseD1, decryptJournalPrivateKey, decryptUserPrivateKey, decryptEntryContent, entryD1Body, maybeGunzip } from "../src/ingest/rest/d1.ts";
+import { parseMasterKey, deriveMasterAesKey } from "../src/ingest/rest/crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
 const cat = (...a: Uint8Array[]) => { const n = a.reduce((s, x) => s + x.length, 0); const o = new Uint8Array(n); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
