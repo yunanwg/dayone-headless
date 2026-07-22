@@ -112,19 +112,60 @@ function buildServer(): McpServer {
   return server;
 }
 
-const server = buildServer();
 const port = process.env.DAYONE_MCP_PORT;
 
 if (port) {
-  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
+  // Stateful streamable-HTTP: one transport+server per session, routed by the
+  // mcp-session-id header. A single shared transport must NOT be reused across
+  // requests — the SDK collides message ids and the handshake fails. We create a
+  // fresh transport only on `initialize`, register it on session init, and drop
+  // it on close; any other session-less request is rejected cleanly.
+  const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
+  const isInit = (body: unknown): boolean =>
+    Array.isArray(body)
+      ? body.some((m) => (m as { method?: string })?.method === "initialize")
+      : (body as { method?: string })?.method === "initialize";
+
   Bun.serve({
     port: Number(port),
     hostname: process.env.DAYONE_MCP_HOST ?? "0.0.0.0",
-    fetch: (req) => transport.handleRequest(req),
+    fetch: async (req) => {
+      const sid = req.headers.get("mcp-session-id");
+      const existing = sid ? transports.get(sid) : undefined;
+      if (existing) return existing.handleRequest(req);
+
+      if (req.method === "POST") {
+        const body = await req.json().catch(() => null);
+        if (isInit(body)) {
+          const transport: WebStandardStreamableHTTPServerTransport =
+            new WebStandardStreamableHTTPServerTransport({
+              sessionIdGenerator: () => crypto.randomUUID(),
+              onsessioninitialized: (id) => {
+                transports.set(id, transport);
+              },
+              onsessionclosed: (id) => {
+                transports.delete(id);
+              },
+            });
+          transport.onclose = () => {
+            if (transport.sessionId) transports.delete(transport.sessionId);
+          };
+          await buildServer().connect(transport);
+          return transport.handleRequest(req, { parsedBody: body });
+        }
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "No valid session id" },
+          id: null,
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    },
   });
   console.error(`dayone-headless MCP server ready (read-only, http :${port})`);
 } else {
-  await server.connect(new StdioServerTransport());
+  await buildServer().connect(new StdioServerTransport());
   console.error("dayone-headless MCP server ready (read-only, stdio)");
 }
