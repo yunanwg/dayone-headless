@@ -21,7 +21,7 @@
     "format": "biome check --write src test scripts",
     "test": "bun test",
     "check": "bun run typecheck && bun run lint && bun test",
-    "prepare": "lefthook install || true"
+    "prepare": "command -v lefthook >/dev/null 2>&1 && lefthook install || true"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
