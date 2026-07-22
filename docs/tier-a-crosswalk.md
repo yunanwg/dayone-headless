@@ -32,8 +32,11 @@ to the web client or are counted differently before trusting Tier A as complete.
 ## Encoding gotchas (apply across every mapping)
 
 - **Case**: IndexedDB is `snake_case`; the export is `camelCase`.
-- **Dates**: IndexedDB `date` / `edit_date` / `created_at` are **epoch numbers**;
-  the export uses **ISO-8601 UTC strings**. Convert.
+- **Dates**: IndexedDB `date` / `edit_date` / `created_at` are **epoch ms, true
+  UTC** (verified: `new Date(date).toISOString()` matches the export's
+  `creationDate` to the second). Convert to ISO — but **strip milliseconds** to
+  match the export format: it writes `2024-09-03T05:39:14Z`, not `…:14.000Z`.
+  So: `new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z")`.
 - **Booleans**: IndexedDB uses `0/1` numbers for most flags (some genuine bools).
 - **Media md5**: `moments` carries **two** md5s — `md5_envelope` (encrypted
   envelope) and `md5_body`. The on-disk export file is `<md5>.<type>`; `md5_body`
@@ -132,5 +135,8 @@ Shape TBD (record truncated during recon; count 314). Reconcile before use.
    cache, see above), not scattered missing entries.
 3. `medias` (8) vs `moments` (2459) — what is the `medias` store for. (open)
 4. `tags` record shape. (open)
-5. Do epoch dates carry local wall time or UTC? Cross-check `timezone` + the
-   export's ISO values on the same entry. (open)
+5. **RESOLVED — epoch dates are true UTC.** `new Date(entries.date).toISOString()`
+   matched three export `creationDate` values verbatim (to the second). Strip
+   milliseconds to match the export's `…Z` format. This timestamp match also
+   gives the content-based identity anchor Q1 needs, and cross-validated that the
+   J3 journal's IndexedDB == its export.
