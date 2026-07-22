@@ -28,7 +28,9 @@ mirror.db-*
 data/
 exports/
 *.dayone-export.json
-recon/          # DevTools/CDP recon scratch: HAR, logged key/iv/plaintext
+# DevTools/CDP recon scratch: HAR, logged key/iv/plaintext (inline comments are
+# NOT valid in .gitignore — keep this on its own line).
+recon/
 
 # === Node / TS ===
 node_modules/
