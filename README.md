@@ -64,7 +64,7 @@ Set at minimum, in `.env`:
 Then build the mirror and use it:
 
 ```bash
-bun run sync                 # fetch + decrypt + write mirror.db
+bun run sync                 # fetch + decrypt + write data/mirror.db
 bun run cli doctor           # config + mirror health check
 
 bun run cli journals
@@ -115,7 +115,7 @@ Add it to a stdio MCP client (e.g. Claude Desktop / Claude Code) roughly like:
     "dayone": {
       "command": "bun",
       "args": ["run", "/absolute/path/to/dayone-headless/src/serve/cli.ts", "mcp"],
-      "env": { "DAYONE_MIRROR": "/absolute/path/to/mirror.db" }
+      "env": { "DAYONE_MIRROR": "/absolute/path/to/data/mirror.db" }
     }
   }
 }
