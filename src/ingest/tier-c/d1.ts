@@ -15,7 +15,7 @@
  */
 
 import { gunzipSync } from "node:zlib";
-import { rsaUnwrap, importAesKey } from "./crypto.ts";
+import { rsaUnwrap, importAesKey, deriveMasterAesKey } from "./crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
 const td = new TextDecoder();
@@ -67,13 +67,27 @@ export function maybeGunzip(u: Uint8Array): Uint8Array {
 }
 
 /**
- * Decrypt a journal's content RSA private key (D1 type 0x00) with the vault key.
- * Returns an imported RSA-OAEP/SHA-1 key ready to unwrap per-entry content keys.
+ * Decrypt an RSA private key stored as a **D1 type-00** blob (AES-256-GCM with a
+ * raw key) → imported RSA-OAEP/SHA-1 key. Used for both the journal content key
+ * (AES key = vault key) and the user key (AES key = K_pass from the master key).
  */
-export async function decryptJournalPrivateKey(vaultKey: Uint8Array, encryptedPrivateKey: Uint8Array): Promise<CryptoKey> {
+export async function decryptD1PrivateKey(aesKeyRaw: Uint8Array, encryptedPrivateKey: Uint8Array): Promise<CryptoKey> {
   const d = parseD1(encryptedPrivateKey);
-  const pem = td.decode(await aesGcm(vaultKey, d.iv, d.body)); // PKCS#8 PEM
+  const pem = td.decode(await aesGcm(aesKeyRaw, d.iv, d.body)); // PKCS#8 PEM
   return subtle.importKey("pkcs8", pemToDer(pem) as BufferSource, { name: "RSA-OAEP", hash: "SHA-1" }, false, ["decrypt"]);
+}
+
+/** The journal content private key: D1 type-00, unlocked by the vault key. */
+export const decryptJournalPrivateKey = decryptD1PrivateKey;
+
+/**
+ * The USER's private key: derive K_pass from the master key `D1-<userId>-<code…>`,
+ * then decrypt the type-00 `encryptedPrivateKey` (from `GET /api/users/key`). This
+ * is the pure-passphrase path — no cached key, no browser.
+ */
+export async function decryptUserPrivateKey(masterKey: string, encryptedPrivateKey: Uint8Array): Promise<CryptoKey> {
+  const { keyRaw } = await deriveMasterAesKey(masterKey);
+  return decryptD1PrivateKey(keyRaw, encryptedPrivateKey);
 }
 
 /** Strip the `<json header>\n` prefix an entry-content blob carries before its D1 body. */

@@ -46,7 +46,7 @@ test("AES-256-GCM envelope (iv‖ct‖tag) decrypts to the plaintext", async () 
 });
 
 test("derivePassphraseKey (PBKDF2) yields a usable AES-GCM key", async () => {
-  const salt = crypto.getRandomValues(new Uint8Array(PARAMS.pbkdf2.saltBytes));
+  const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await derivePassphraseKey("correct horse battery staple", salt);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const plain = new TextEncoder().encode("wrapped private key bytes");

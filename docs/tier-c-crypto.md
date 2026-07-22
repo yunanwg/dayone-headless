@@ -133,19 +133,22 @@ endpoints seen on the login page are alternative methods, unused). No
 browser-free and unattended. (`GET /api/users/key` returns the passphrase-wrapped
 user key `encryptedPrivateKey` for the full passphrase decrypt path.)
 
-## Remaining open
+## Master key → user private key (RESOLVED — the pure-passphrase path)
 
-1. **PBKDF2 salt provenance** for the passphrase→user-key unwrap (type-01) — 22B
-   salt; where stored/derived (near
-   `encryptedPrivateKey`? per-user?).
-4. **AES-GCM AAD** — absent on observed calls; confirm across entry vs attachment.
-5. **Envelope byte order** — IV‖ciphertext‖tag concatenation in stored blobs.
+The "encryption key" the user types is Day One's **master key string**
+`D1-<userId>-<code…>`. From it (implemented in `crypto.ts` / `d1.ts`):
+- PBKDF2 **password** = the code groups joined (dashes stripped), UTF-8 — no
+  decode/hash/truncate.
+- PBKDF2 **salt** = `userId` (part [1]) as UTF-8 — external, not embedded.
+- **100000** iterations, **SHA-256** → an AES-256-GCM key.
+- That key decrypts the user's `encryptedPrivateKey` (a D1 **type-00** blob, from
+  `GET /api/users/key`) → PKCS#8 PEM RSA private key.
 
-Resolved by recon: the vault/grant key hierarchy (above) and the API auth header.
+So the whole pipeline is env-only (see `reader.ts`): master key + token/creds →
+unlock user key → per journal unwrap vault key → journal key → per entry unwrap
+content key → decrypt. Validated: the primitives + D1 chain by synthetic
+roundtrips; the live end-to-end decrypt against a known-plaintext entry (with the
+cached user key). Remaining validation the user can run: point `reader.ts` at real
+`DAYONE_MASTER_KEY` + creds and diff against the JSON export / Tier A mirror.
 
-## Build plan
-
-Reimplement the chain with Node/bun WebCrypto (same primitives, our keys), then
-prove **byte-identical** decryption against the Tier A mirror: same entries via
-Tier C and via Tier A → assert equal. Tier A stays the golden oracle; a red
-conformance test tells us exactly what diverged.
+Everything else (envelope byte order, AAD=none, salt provenance) is resolved above.

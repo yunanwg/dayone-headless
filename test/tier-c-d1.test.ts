@@ -5,7 +5,8 @@
 
 import { test, expect } from "bun:test";
 import { gzipSync } from "node:zlib";
-import { parseD1, decryptJournalPrivateKey, decryptEntryContent, entryD1Body, maybeGunzip } from "../src/ingest/tier-c/d1.ts";
+import { parseD1, decryptJournalPrivateKey, decryptUserPrivateKey, decryptEntryContent, entryD1Body, maybeGunzip } from "../src/ingest/tier-c/d1.ts";
+import { parseMasterKey, deriveMasterAesKey } from "../src/ingest/tier-c/crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
 const cat = (...a: Uint8Array[]) => { const n = a.reduce((s, x) => s + x.length, 0); const o = new Uint8Array(n); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
@@ -75,6 +76,31 @@ test("decryptEntryContent (type-02) recovers plaintext, incl. gzip + JSON-header
   expect(entryD1Body(blob)[0]).toBe(0x44); // header stripped
   const out = await decryptEntryContent(journal.privateKey, blob);
   expect(new TextDecoder().decode(out)).toBe(known);
+});
+
+test("parseMasterKey splits D1-<userId>-<code…> into userId + password bytes", () => {
+  const { userId, passwordBytes } = parseMasterKey("D1-user123456-ABCDE-FGHJK");
+  expect(userId).toBe("user123456");
+  expect(new TextDecoder().decode(passwordBytes)).toBe("ABCDEFGHJK"); // groups joined, dashes stripped
+  expect(() => parseMasterKey("not-a-key")).toThrow();
+});
+
+test("decryptUserPrivateKey (master key → PBKDF2 → type-00) recovers the user key", async () => {
+  const user = await genRsa();
+  const masterKey = "D1-user123456-ABCDE-FGHJK-LMNPQ-RTUVW-XYZ23-46789";
+  const { keyRaw, userId } = await deriveMasterAesKey(masterKey);
+  expect(userId).toBe("user123456");
+  expect(keyRaw).toHaveLength(32);
+
+  const iv = rand(12);
+  const pem = new TextEncoder().encode(await toPem(user.privateKey));
+  const blob = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(keyRaw, iv, pem), md5pad);
+
+  const recovered = await decryptUserPrivateKey(masterKey, blob);
+  const secret = rand(32);
+  const wrapped = new Uint8Array(await subtle.encrypt({ name: "RSA-OAEP" }, user.publicKey, secret));
+  const out = new Uint8Array(await subtle.decrypt({ name: "RSA-OAEP" }, recovered, wrapped));
+  expect([...out]).toEqual([...secret]); // proves the recovered key is the user's
 });
 
 test("maybeGunzip passes plain bytes through and inflates gzip", () => {
