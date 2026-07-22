@@ -26,16 +26,33 @@ export interface DayOneApiConfig {
   baseUrl?: string;
 }
 
+/** A plausible web-client user-agent; overridable via DAYONE_X_USER_AGENT. */
+const DEFAULT_X_USER_AGENT = "DayOneWeb/2026.15 (en-US; dayone-headless; Server; Release/1; Core/1.0.0)";
+
+const randomHex = (n: number): string =>
+  [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+/** Build the `device-info` header. `Id` is the client-generated device identity;
+ * pin it via DAYONE_DEVICE_ID so repeat runs are the SAME device (not a new one). */
+export function buildDeviceInfo(id: string): string {
+  return `Id="${id}"; Model="dayone-headless"; Name="dayone-headless"; Language="en-US"; Country="US"; app_id="com.bloombuilt.dayone-web"`;
+}
+
+/**
+ * Self-contained config from env — a real deployment only needs credentials:
+ *   DAYONE_MASTER_KEY (for decryption, read elsewhere) + auth below.
+ * Auth: DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD (self-minted).
+ * Optional: DAYONE_DEVICE_ID (pin the device), DAYONE_X_USER_AGENT/DEVICE_INFO.
+ */
 export function apiConfigFromEnv(): DayOneApiConfig {
   const token = process.env.DAYONE_API_TOKEN;
   const email = process.env.DAYONE_EMAIL;
   const password = process.env.DAYONE_PASSWORD;
-  const xUserAgent = process.env.DAYONE_X_USER_AGENT;
-  const deviceInfo = process.env.DAYONE_DEVICE_INFO;
-  if (!xUserAgent || !deviceInfo) throw new Error("missing DAYONE_X_USER_AGENT / DAYONE_DEVICE_INFO");
   if (!token && !(email && password)) {
     throw new Error("provide DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD to mint one");
   }
+  const xUserAgent = process.env.DAYONE_X_USER_AGENT || DEFAULT_X_USER_AGENT;
+  const deviceInfo = process.env.DAYONE_DEVICE_INFO || buildDeviceInfo(process.env.DAYONE_DEVICE_ID || randomHex(16));
   return { token, xUserAgent, deviceInfo, credentials: email && password ? { email, password } : undefined };
 }
 
