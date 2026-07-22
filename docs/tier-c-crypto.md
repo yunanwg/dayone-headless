@@ -71,66 +71,64 @@ Data path:
   `application/octet-stream`); decrypt client-side with the content key.
 - Account/config: `/api/v3/users`, `/api/user-settings`, `/api/v2/feature-flags`.
 
-## STATUS (2026-07-22)
+## STATUS (2026-07-22) — TIER C WORKS END-TO-END
 
-**REST + env: WORKING.** `src/ingest/tier-c/api.ts` is a pure-`fetch` (no browser)
-client driven by env (`DAYONE_API_TOKEN`, `DAYONE_X_USER_AGENT`, `DAYONE_DEVICE_INFO`).
-Verified from Node: `getJournals()`, `getEntriesFeed(jid)` (NDJSON revisions; each
-`revision.entryId` is the 32-hex export uuid + `contentLength`), and
-`getEntryContent(jid, entryId)` → the encrypted blob. This is the browser-free
-data path.
+**Pure REST + env + own crypto: DECRYPTS REAL ENTRIES, no browser.** Validated
+against a known-plaintext new entry: fetched its ciphertext via `api.ts` and
+recovered the exact text with `d1.ts` + `crypto.ts`, entirely in Node.
 
-**Content decryption: BLOCKED on the inner envelope layout.** Confirmed the
-`crypto.ts` primitives and the outer unwrap (user RSA → vault key, oracle-validated).
-But the innermost content decrypt is not yet cracked (see below).
+- `api.ts` — pure `fetch` client (env: `DAYONE_API_TOKEN`/`X_USER_AGENT`/`DEVICE_INFO`):
+  `getJournals()`, `getEntriesFeed(jid)`, `getEntryContent(jid, entryId)`.
+- `crypto.ts` — WebCrypto primitives (RSA-OAEP/SHA-1, AES-256-GCM, PBKDF2, fingerprints).
+- `d1.ts` — the D1 envelope parser + `decryptJournalPrivateKey` + `decryptEntryContent`.
+
+**The former blocker was a trailing 16-byte MD5 checksum** after the GCM tag (found
+by reading the app bundle). Stripping it before AES-GCM made the whole chain work.
+There is **no key derivation** — the 32-byte vault key is used raw as the AES-GCM key.
 
 ## D1 envelope format
 
-Every encrypted blob is `"D1"` (`44 31`) ‖ `ver`(`01`) ‖ `type`(1 byte) ‖ payload:
-- **type `01`** — PBKDF2/passphrase-wrapped (the user key, `content_keys.encryptedPrivateKey`). Salt lives in the payload.
-- **type `00`** — symmetric AES-GCM-wrapped (the journal content private key, `vault.keys[].encrypted_private_key`).
-- **type `02`** — RSA-hybrid (per-entry content). Payload appears to be `wrappedKey ‖ iv ‖ ct ‖ tag`.
+Full layout (offsets from the start of the blob), implemented in `d1.ts`:
 
-An entry content blob = `<JSON revision header>` ‖ `\n` ‖ `<D1 type-02 ciphertext>`
-(`contentLength` = the D1 part).
+```
+"D1"(44 31)  0..2
+ver 0x01     2..3
+type         3..4
+[type != 0]  fingerprint 32B ‖ sigLen(uint16 BE) 2B ‖ signature(sigLen) ‖ lockedKey(RSA-wrapped) 256B
+iv           12B
+cipherText   (len - 16 - ivEnd) ... up to len-32
+gcmTag       len-32 .. len-16
+md5          len-16 .. len    ← MD5(bytes[0..len-16]); STRIP before AES-GCM
+```
 
-## THE BLOCKER (content decryption)
+- **type `01`** — PBKDF2/passphrase (user key, `content_keys.encryptedPrivateKey`; salt in payload).
+- **type `00`** — AES-256-GCM with the **raw** 32-byte vault key (no KDF); plaintext = the journal RSA private key as PKCS#8 PEM.
+- **type `02`** — RSA-hybrid: RSA-OAEP(SHA-1) unwrap the 256-byte `lockedKey` with the journal private key → 32-byte content key → AES-256-GCM the body. Plaintext may be gzip'd (magic `1f8b`, up to 3 passes).
 
-The oracle-validated **vault key does NOT decrypt** `vault.keys[].encrypted_private_key`
-(type 00) at any iv offset (scanned), nor the entry (type 02) directly. Tried for
-the entry: vault-key-direct, user-RSA-unwrap of the leading 256B, offset scans —
-all fail GCM tag validation. So the journal private key is wrapped by a key that
-is *not* the raw vault key (a derived KEK? a different vault member?), and without
-the journal private key the per-entry content key (type 02) can't be unwrapped.
+WebCrypto AES-GCM wants `cipherText ‖ gcmTag` as data + `iv` separate. AAD = none.
+An entry content blob = `<JSON revision header>` ‖ `\n` ‖ `<D1 type-02>` (`contentLength` = the D1 part).
 
-Cracking this needs a **correlated byte capture**: hook `crypto.subtle.decrypt` and
-record the exact (iv, ciphertext) while the app decrypts a KNOWN entry, then line
-those bytes up against its D1 blob (iv is public, ciphertext is encrypted — safe).
+## How the former blocker was solved
 
-Attempted trigger (2026-07-22): hook + **clear the DODexie `entries`/`moments`
-stores + reload**. It did NOT force a re-decrypt — only 3 init-time local decrypts
-fired (86→70, 65→49 byte secrets); no entry content decrypt. Reason: `sync_states`
-still holds the cursor, so the app considers the journal synced and does not
-re-fetch/re-decrypt. Forcing it would require also clearing the sync cursor, which
-risks disturbing account sync state — not attempted.
+The oracle-validated vault key kept failing to AES-GCM-decrypt the type-00 journal
+key at every iv offset. Two live-capture attempts (clear cache + reload; create a
+new entry + capture) both saw only init-time local decrypts — because the content
+decryption runs elsewhere and the main-thread `crypto.subtle` hook missed it.
 
-**Current stopping point.** Remaining options (need care / user go-ahead): clear
-`sync_states` too and re-capture; or reverse the minified decryption module in the
-bundle to read the exact key-derivation for D1 type-00/02.
+A subagent then read the app bundle (`analytics.*.js`) directly and found it: **the
+last 16 bytes of every D1 blob are an MD5 checksum, after the GCM tag** — feeding
+them into AES-GCM guaranteed failure. No key derivation exists; the vault key is
+used raw. With the MD5 stripped, the full chain decrypted a known-plaintext new
+entry byte-for-byte. Lesson: reading the code beat black-box byte-guessing.
 
-## Open unknowns (before Tier C content decryption works)
+## Remaining open (Tier C is otherwise complete)
 
-1. **Login → the 32-char `authorization` token.** The token SHAPE is known; how the
-   email/password login mints it is not (the session was reused from the profile).
-   Needs a login recon (email/password only — no Apple/Google). The last
-   anti-automation question.
-2. **Entry-feed ciphertext envelope** — `/api/v2/sync/entries/{id}/feed` is an
-   INCREMENTAL sync; on an already-synced profile it returns nothing (304/empty),
-   so the per-entry framing (ciphertext ‖ IV ‖ tag ‖ content-key ref) was not yet
-   captured. Capture via a from-zero cursor, a sync reset, or a fresh-profile first
-   sync. (Alternatively validate the AES-GCM path first on an **attachment** blob
-   from S3, which is fetched fresh each view.)
-3. **PBKDF2 salt provenance** — 22B salt; where stored/derived (near
+1. **Login → the 32-char `authorization` token.** Content decryption + REST fetch
+   both work with a token in env; how the email/password login *mints* that token
+   is the one un-reversed step (the session was reused from the profile). Needs a
+   login recon (email/password only — no Apple/Google 2FA, per the fixed-passphrase
+   path). Until then, the token is supplied via env like any other credential.
+2. **PBKDF2 salt provenance** — 22B salt; where stored/derived (near
    `encryptedPrivateKey`? per-user?).
 4. **AES-GCM AAD** — absent on observed calls; confirm across entry vs attachment.
 5. **Envelope byte order** — IV‖ciphertext‖tag concatenation in stored blobs.
