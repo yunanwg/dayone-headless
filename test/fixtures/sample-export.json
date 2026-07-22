@@ -1,0 +1,40 @@
+{
+  "metadata": { "version": "1.0" },
+  "entries": [
+    {
+      "uuid": "AAAA1111BBBB2222CCCC3333DDDD4444",
+      "creationDate": "2021-07-22T08:30:00Z",
+      "modifiedDate": "2021-07-22T09:00:00Z",
+      "timeZone": "Europe/Paris",
+      "text": "First morning in Paris. Coffee by the Seine, croissant crumbs everywhere.",
+      "starred": true,
+      "tags": ["travel", "paris"],
+      "location": {
+        "localityName": "Paris",
+        "country": "France",
+        "placeName": "Rive Gauche",
+        "latitude": 48.8566,
+        "longitude": 2.3522
+      },
+      "weather": { "weatherCode": "clear", "temperatureCelsius": 22.5 },
+      "photos": [
+        { "identifier": "PHOTO-ID-1", "md5": "abc123", "type": "jpeg", "orderInEntry": 0 }
+      ]
+    },
+    {
+      "uuid": "EEEE5555FFFF6666GGGG7777HHHH8888",
+      "creationDate": "2019-07-22T20:15:00Z",
+      "timeZone": "America/New_York",
+      "text": "Late night debugging session. The bug was a missing await, of course.",
+      "tags": ["code"]
+    },
+    {
+      "uuid": "IIII9999JJJJ0000KKKK1111LLLL2222",
+      "creationDate": "2023-01-03T12:00:00Z",
+      "timeZone": "Asia/Shanghai",
+      "text": "New year, homelab plans: headless journal reader.",
+      "starred": false,
+      "tags": ["homelab", "code"]
+    }
+  ]
+}
