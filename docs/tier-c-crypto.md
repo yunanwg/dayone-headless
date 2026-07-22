@@ -121,14 +121,22 @@ them into AES-GCM guaranteed failure. No key derivation exists; the vault key is
 used raw. With the MD5 stripped, the full chain decrypted a known-plaintext new
 entry byte-for-byte. Lesson: reading the code beat black-box byte-guessing.
 
-## Remaining open (Tier C is otherwise complete)
+## Auth / token minting (RESOLVED — fully headless)
 
-1. **Login → the 32-char `authorization` token.** Content decryption + REST fetch
-   both work with a token in env; how the email/password login *mints* that token
-   is the one un-reversed step (the session was reused from the profile). Needs a
-   login recon (email/password only — no Apple/Google 2FA, per the fixed-passphrase
-   path). Until then, the token is supplied via env like any other credential.
-2. **PBKDF2 salt provenance** — 22B salt; where stored/derived (near
+`POST /api/v3/users/login` with `{email, password}` → `{ token (32-char),
+created_at, user{…} }`. No OAuth, no 2FA on the password path (the webauthn/QR
+endpoints seen on the login page are alternative methods, unused). No
+`refresh_token` and no token `expires_at` — it's a long-lived device-session token
+(the response carries device management: `active_device`, `switch_allowed_interval`).
+**Renewal = call login again.** `api.ts` mints/auto-renews the token from env
+(`DAYONE_EMAIL`+`DAYONE_PASSWORD`) and retries once on 401 — so the whole client is
+browser-free and unattended. (`GET /api/users/key` returns the passphrase-wrapped
+user key `encryptedPrivateKey` for the full passphrase decrypt path.)
+
+## Remaining open
+
+1. **PBKDF2 salt provenance** for the passphrase→user-key unwrap (type-01) — 22B
+   salt; where stored/derived (near
    `encryptedPrivateKey`? per-user?).
 4. **AES-GCM AAD** — absent on observed calls; confirm across entry vs attachment.
 5. **Envelope byte order** — IV‖ciphertext‖tag concatenation in stored blobs.
