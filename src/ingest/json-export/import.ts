@@ -79,7 +79,7 @@ export function importExport(
         $text: e.text ?? null,
         $rich_text: e.richText ?? null,
         $starred: e.starred ? 1 : 0,
-        $pinned: e.pinned ? 1 : 0,
+        $pinned: e.isPinned ? 1 : 0,
         $is_all_day: e.isAllDay ? 1 : 0,
         $editing_time: e.editingTime ?? null,
         $latitude: e.location?.latitude ?? null,
