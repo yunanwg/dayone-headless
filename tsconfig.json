@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     // Bun runs TS directly; tsc is used only for type-checking (noEmit).
-    "lib": ["ESNext"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "target": "ESNext",
     "moduleResolution": "bundler",
