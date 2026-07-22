@@ -149,6 +149,6 @@ unlock user key → per journal unwrap vault key → journal key → per entry u
 content key → decrypt. Validated: the primitives + D1 chain by synthetic
 roundtrips; the live end-to-end decrypt against a known-plaintext entry (with the
 cached user key). Remaining validation the user can run: point `reader.ts` at real
-`DAYONE_MASTER_KEY` + creds and diff against the JSON export / Tier A mirror.
+`DAYONE_ENCRYPTION_KEY` + creds and diff against the JSON export / Tier A mirror.
 
 Everything else (envelope byte order, AAD=none, salt provenance) is resolved above.

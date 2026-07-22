@@ -40,7 +40,7 @@ export function buildDeviceInfo(id: string): string {
 
 /**
  * Self-contained config from env — a real deployment only needs credentials:
- *   DAYONE_MASTER_KEY (for decryption, read elsewhere) + auth below.
+ *   DAYONE_ENCRYPTION_KEY (for decryption, read elsewhere) + auth below.
  * Auth: DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD (self-minted).
  * Optional: DAYONE_DEVICE_ID (pin the device), DAYONE_X_USER_AGENT/DEVICE_INFO.
  */
