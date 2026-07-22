@@ -48,7 +48,7 @@ export interface JournalKeys {
   journals: any[];
 }
 
-export class TierCReader {
+export class RestReader {
   constructor(
     private readonly api: DayOneApi,
     private readonly masterKey: string,

@@ -22,7 +22,7 @@ import type { DayOneEntry } from "../../types.ts";
 import { importExport } from "../json-export/import.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { mapEntry } from "./map.ts";
-import { type EntryRef, TierCReader } from "./reader.ts";
+import { type EntryRef, RestReader } from "./reader.ts";
 
 export interface SyncResult {
   journals: number;
@@ -43,7 +43,7 @@ export async function sync(
 ): Promise<SyncResult> {
   const log = opts.onProgress ?? (() => {});
   const concurrency = opts.concurrency ?? 8;
-  const reader = new TierCReader(new DayOneApi(apiConfigFromEnv()), masterKey);
+  const reader = new RestReader(new DayOneApi(apiConfigFromEnv()), masterKey);
 
   const keys = await reader.unlockKeys();
   log(`unlocked ${keys.journalPrivByFingerprint.size} journal key(s)`);

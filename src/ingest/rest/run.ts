@@ -11,13 +11,13 @@
  */
 
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
-import { TierCReader } from "./reader.ts";
+import { RestReader } from "./reader.ts";
 
 const masterKey = process.env.DAYONE_ENCRYPTION_KEY;
 if (!masterKey) throw new Error("set DAYONE_ENCRYPTION_KEY (the D1-<userId>-<code…> encryption key)");
 
 const api = new DayOneApi(apiConfigFromEnv());
-const reader = new TierCReader(api, masterKey);
+const reader = new RestReader(api, masterKey);
 
 const keys = await reader.unlockKeys();
 console.error(
