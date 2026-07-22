@@ -23,7 +23,7 @@ function dump(over: Record<string, any> = {}) {
   };
 }
 
-test("a journal with zero cached entries is flagged incomplete (the J4 case)", () => {
+test("a journal with zero cached entries is flagged incomplete (the empty-journal case)", () => {
   const rows = computeCompleteness(
     dump({
       entries: [
