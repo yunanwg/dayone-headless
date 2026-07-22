@@ -104,10 +104,19 @@ is *not* the raw vault key (a derived KEK? a different vault member?), and witho
 the journal private key the per-entry content key (type 02) can't be unwrapped.
 
 Cracking this needs a **correlated byte capture**: hook `crypto.subtle.decrypt` and
-record the exact (key, iv, ciphertext-prefix) while the app decrypts a KNOWN entry,
-then line those bytes up against its D1 blob. That requires forcing a fresh decrypt
-of a cached entry (no clean trigger found yet) or deeper bundle RE — beyond blind
-byte-boundary iteration. **This is the current stopping point.**
+record the exact (iv, ciphertext) while the app decrypts a KNOWN entry, then line
+those bytes up against its D1 blob (iv is public, ciphertext is encrypted — safe).
+
+Attempted trigger (2026-07-22): hook + **clear the DODexie `entries`/`moments`
+stores + reload**. It did NOT force a re-decrypt — only 3 init-time local decrypts
+fired (86→70, 65→49 byte secrets); no entry content decrypt. Reason: `sync_states`
+still holds the cursor, so the app considers the journal synced and does not
+re-fetch/re-decrypt. Forcing it would require also clearing the sync cursor, which
+risks disturbing account sync state — not attempted.
+
+**Current stopping point.** Remaining options (need care / user go-ahead): clear
+`sync_states` too and re-capture; or reverse the minified decryption module in the
+bundle to read the exact key-derivation for D1 type-00/02.
 
 ## Open unknowns (before Tier C content decryption works)
 
