@@ -1,33 +1,37 @@
-# Tier A crosswalk — IndexedDB (`DODexie`) → export-shaped mirror
+# Browser ingester crosswalk — IndexedDB (`DODexie`) → export-shaped mirror
 
-Phase 0 recon output (2026-07-22, CDP against a logged-in `dayone.me` session).
-This is the spec the Tier A ingester implements. It contains **field names and
-mappings only — no journal content**.
+> Design reference for the **browser ingester** (`src/ingest/browser/`), the
+> dev/oracle path. For how it fits the whole system, see
+> [architecture.md](architecture.md); for the extraction pipeline, see
+> [browser-extractor.md](browser-extractor.md).
+
+This is the field-mapping spec the browser ingester implements. It contains
+**field names and mappings only — no journal content**.
 
 ## Decisive finding
 
-The Day One web app caches **decrypted plaintext** in IndexedDB. Tier A needs
-**no crypto**: read the Dexie stores and translate them into the mirror
-(whose contract is the JSON-export shape, see `src/types.ts`). Crypto is a Tier C
-concern only.
+The Day One web app caches **decrypted plaintext** in IndexedDB. The browser
+ingester needs **no crypto**: read the Dexie stores and translate them into the
+mirror (whose contract is the JSON-export shape, see `src/types.ts`). Crypto is
+the REST ingester's concern only.
 
 ## Source: Dexie DB `DODexie` (v920, 41 object stores)
 
 Non-empty stores (record counts on this account):
 
-| store | count | role for Tier A |
+| store | count | role for the browser ingester |
 |---|---|---|
 | `entries` | 3525 | primary — decrypted entries |
 | `moments` | 2459 | media/attachments |
 | `journals` | 4 | journal list |
 | `tags` | 314 | tags |
 | `medias` | 8 | (secondary media table — TBD vs `moments`) |
-| `content_keys` / `user_keys` / `vaults` | 1 / 2 / 4 | **Tier C only** — key material, not read by Tier A |
+| `content_keys` / `user_keys` / `vaults` | 1 / 2 / 4 | **REST ingester only** — key material, not read by the browser ingester |
 | `search`, `kv`, `server_flags`, `sync_states`, `devices`, `daily_chats`, `pbc_templates`, … | — | not needed for read mirror |
 
 Note: IndexedDB `entries`=3525 vs the JSON export's 3577. ~52 gap ≈ the
 `J4` journal size — **investigate** whether some journals aren't synced
-to the web client or are counted differently before trusting Tier A as complete.
+to the web client or are counted differently before trusting the browser ingester as complete.
 
 ## Encoding gotchas (apply across every mapping)
 
@@ -47,7 +51,7 @@ to the web client or are counted differently before trusting Tier A as complete.
 
 | IndexedDB | export field | notes |
 |---|---|---|
-| `id` (18 chars) | `uuid` (32 hex) | **Unrelated id spaces** (resolved): IndexedDB has no 32-hex uuid field. Tier A keys by the web `id` via `deriveUuid`; oracle/cross-ingester identity is content-based. See "Resolved / remaining questions". |
+| `id` (18 chars) | `uuid` (32 hex) | **Unrelated id spaces** (resolved): IndexedDB has no 32-hex uuid field. The browser ingester keys by the web `id` via `deriveUuid`; oracle/cross-ingester identity is content-based. See "Resolved / remaining questions". |
 | `body` | `text` | plaintext Markdown |
 | `rich_text_json` | `richText` | plaintext JSON `{meta,contents}` |
 | `date` (epoch) | `creationDate` | → ISO |
@@ -106,13 +110,13 @@ decrypted client-side). The mirror only needs `id` + `name`; keep the rest in
 ## `tags` → mirror `tag` / `entry_tag`
 Shape TBD (record truncated during recon; count 314). Reconcile before use.
 
-## Tier A extraction requirements (from recon)
+## Browser-ingester extraction requirements
 
 - **Completeness is NOT free — the IndexedDB cache is lazy.** Recon found the
   `J4` journal present in `journals` (metadata + keys, `is_decrypted=1`)
   but with **0 entries** in `entries`, exactly the 52-entry gap vs the export
   (J1/J2/J3 matched to the record). The web client loads a journal's
-  entries on demand. So Tier A **must force-load every journal** (open each in the
+  entries on demand. So the browser ingester **must force-load every journal** (open each in the
   driven web app, wait for sync) and then **verify per-journal counts** before
   trusting the dump. Emit a loud warning on any shortfall — never silently ship a
   partial mirror.
@@ -127,9 +131,10 @@ Shape TBD (record truncated during recon; count 314). Reconcile before use.
 1. **RESOLVED — `entries.id` (18) vs export `uuid` (32).** The IndexedDB `entries`
    record has **no 32-hex uuid field at all** (37 keys inspected; none hex-32).
    The web id space and the export uuid space are unrelated. Consequences:
-   Tier A keys entries by the web `id` (via `deriveUuid`); **cross-ingester /
-   oracle identity must be content-based** (e.g. `creationDate`+`text` hash), not
-   uuid. Flag when mixing a Tier-A mirror with a JSON-export mirror — same entry,
+   the browser ingester keys entries by the web `id` (via `deriveUuid`);
+   **cross-ingester / oracle identity must be content-based** (e.g.
+   `creationDate`+`text` hash), not uuid. Flag when mixing a browser-ingester
+   mirror with a JSON-export mirror — same entry,
    different PK → dedupe by content.
 2. **RESOLVED — the 3525 vs 3577 gap is the entire `J4` journal** (lazy
    cache, see above), not scattered missing entries.

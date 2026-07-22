@@ -12,6 +12,7 @@ import type { DayOneApi } from "./api.ts";
 import { rsaUnwrap } from "./crypto.ts";
 import {
   decryptD1PrivateKey,
+  decryptD1Symmetric,
   decryptEntryContent,
   decryptUserPrivateKey,
   entryD1Body,
@@ -42,6 +43,8 @@ export interface JournalKeys {
   userPriv: CryptoKey;
   /** journal-key fingerprint (hex) → that journal's content RSA private key. */
   journalPrivByFingerprint: Map<string, CryptoKey>;
+  /** journal id → its raw vault key (decrypts type-00 blobs like the journal name). */
+  vaultKeyByJournalId: Map<string, Uint8Array>;
   journals: any[];
 }
 
@@ -58,6 +61,7 @@ export class TierCReader {
 
     const journals = await this.api.getJournals();
     const journalPrivByFingerprint = new Map<string, CryptoKey>();
+    const vaultKeyByJournalId = new Map<string, Uint8Array>();
     for (const j of journals) {
       const vault = j?.encryption?.vault;
       if (!vault?.grants?.length || !vault?.keys?.length) continue; // skip empty/foreign vaults
@@ -66,12 +70,13 @@ export class TierCReader {
         userPriv,
         fromB64(vault.grants[0].encrypted_vault_key) as BufferSource,
       );
+      vaultKeyByJournalId.set(String(j.id), vaultKey);
       for (const k of vault.keys) {
         const jp = await decryptD1PrivateKey(vaultKey, fromB64(k.encrypted_private_key));
         if (k.fingerprint) journalPrivByFingerprint.set(String(k.fingerprint).toLowerCase(), jp);
       }
     }
-    return { userPriv, journalPrivByFingerprint, journals };
+    return { userPriv, journalPrivByFingerprint, vaultKeyByJournalId, journals };
   }
 
   /** Stream the latest revision of each (non-deleted) entry in a journal, decrypted. */
@@ -127,10 +132,15 @@ export class TierCReader {
   }
 
   /**
-   * Decrypt a journal's (encrypted) display name — it is itself a D1 blob. Returns
-   * null when the name is missing or its key is unavailable.
+   * Decrypt a journal's (encrypted) display name — itself a D1 blob. The name is
+   * type-00 (symmetric, unlocked by the journal's vault key); type-02 (RSA-hybrid)
+   * is handled too for robustness. Returns null when unavailable.
    */
-  async decryptJournalName(nameB64: string | null | undefined, keys: JournalKeys): Promise<string | null> {
+  async decryptJournalName(
+    nameB64: string | null | undefined,
+    journalId: string,
+    keys: JournalKeys,
+  ): Promise<string | null> {
     if (!nameB64) return null;
     let blob: Uint8Array;
     try {
@@ -140,10 +150,18 @@ export class TierCReader {
     }
     if (blob[0] !== 0x44 || blob[1] !== 0x31) return null; // not a "D1" blob
     const d = parseD1(blob);
-    const jp = d.fingerprint ? keys.journalPrivByFingerprint.get(hex(d.fingerprint)) : undefined;
-    if (!jp) return null;
     try {
-      const raw = new TextDecoder().decode(await decryptEntryContent(jp, blob)).trim();
+      let plain: Uint8Array;
+      if (d.type === 0) {
+        const vaultKey = keys.vaultKeyByJournalId.get(journalId);
+        if (!vaultKey) return null;
+        plain = await decryptD1Symmetric(vaultKey, blob);
+      } else {
+        const jp = d.fingerprint ? keys.journalPrivByFingerprint.get(hex(d.fingerprint)) : undefined;
+        if (!jp) return null;
+        plain = await decryptEntryContent(jp, blob);
+      }
+      const raw = new TextDecoder().decode(plain).trim();
       try {
         const o = JSON.parse(raw);
         return typeof o === "object" && o?.name ? String(o.name) : raw;

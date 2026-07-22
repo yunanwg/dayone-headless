@@ -65,7 +65,7 @@ export async function sync(
     for (const j of keys.journals) {
       if (!j?.encryption?.vault?.keys?.length) continue;
       journalCount++;
-      const name = (await reader.decryptJournalName(j.name, keys)) ?? `journal-${j.id}`;
+      const name = (await reader.decryptJournalName(j.name, j.id, keys)) ?? `journal-${j.id}`;
 
       const refs = await reader.listEntries(j.id);
       const feedUuids = new Set(refs.map((r) => r.entryId));

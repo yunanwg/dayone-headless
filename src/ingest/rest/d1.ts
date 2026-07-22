@@ -72,6 +72,13 @@ export function maybeGunzip(u: Uint8Array): Uint8Array {
   return out;
 }
 
+/** Decrypt a symmetric **D1 type-00** blob with a raw AES-256-GCM key → plaintext
+ * bytes. Used for RSA private keys (below) and small values like journal names. */
+export async function decryptD1Symmetric(aesKeyRaw: Uint8Array, blob: Uint8Array): Promise<Uint8Array> {
+  const d = parseD1(blob);
+  return aesGcm(aesKeyRaw, d.iv, d.body);
+}
+
 /**
  * Decrypt an RSA private key stored as a **D1 type-00** blob (AES-256-GCM with a
  * raw key) → imported RSA-OAEP/SHA-1 key. Used for both the journal content key
@@ -81,8 +88,7 @@ export async function decryptD1PrivateKey(
   aesKeyRaw: Uint8Array,
   encryptedPrivateKey: Uint8Array,
 ): Promise<CryptoKey> {
-  const d = parseD1(encryptedPrivateKey);
-  const pem = td.decode(await aesGcm(aesKeyRaw, d.iv, d.body)); // PKCS#8 PEM
+  const pem = td.decode(await decryptD1Symmetric(aesKeyRaw, encryptedPrivateKey)); // PKCS#8 PEM
   return subtle.importKey(
     "pkcs8",
     pemToDer(pem) as BufferSource,

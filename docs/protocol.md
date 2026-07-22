@@ -1,11 +1,14 @@
-# Tier C — crypto framing & REST map (recon)
+# Protocol — Day One E2EE crypto framing & REST map
 
-North-star: a pure client that fetches ciphertext over REST and decrypts it in
-our own code (no browser). This is the framing captured by hooking
-`crypto.subtle.*` in the live web app and mapping its network — **algorithm
-shapes and endpoints only; no key/plaintext/token values were recorded** (full
-byte-safe logs in gitignored `recon/`). Every claim here must be re-proven
-byte-identical against the Tier A mirror oracle before it is trusted.
+> Design reference for the **REST ingester** (`src/ingest/rest/`). For how it
+> fits the whole system, see [architecture.md](architecture.md).
+
+This is the framing behind the REST ingester: a pure client that fetches
+ciphertext over Day One's sync API and decrypts it in our own code (no browser).
+It was captured by hooking `crypto.subtle.*` in the live web app and mapping its
+network — **algorithm shapes and endpoints only; no key/plaintext/token values
+were recorded** (byte-safe). Every claim here is re-proven byte-identical against
+the **browser ingester** mirror (the conformance oracle) before it is trusted.
 
 ## Key hierarchy (observed)
 
@@ -48,8 +51,8 @@ PBKDF2 ×1, `decrypt` AES-GCM ×25, `importKey` pkcs8 (RSA-OAEP/SHA-1) ×2,
 - `vaults`: `journal_id`, **`vault_json`** (str ~4506) — per-journal vault holding
   the RSA-wrapped content key(s).
 
-Note: IndexedDB caches these post-unlock; a pure Tier C client fetches the
-equivalents over REST (below) and runs the same chain.
+Note: IndexedDB caches these post-unlock; the pure REST client fetches the
+equivalents over the sync API (below) and runs the same chain.
 
 ## Auth (API access)
 
@@ -63,7 +66,7 @@ login flow (below, unknown #1). Its shape is now known, which makes it scriptabl
 
 Data path:
 - `GET /api/v6/sync/journals` — journal list (+ vault/key material).
-- `GET /api/v6/sync/journals/stats` — per-journal counts (Tier A's completeness oracle).
+- `GET /api/v6/sync/journals/stats` — per-journal counts (the browser ingester's completeness oracle).
 - **`GET /api/v2/sync/entries/{journalId}/feed`** — the entry feed (ciphertext).
 - `GET /api/v4/sync/changes/{device,namedRegion,template}` — incremental sync.
 - `GET /api/journals/{journalId}/attachments/{attachmentId}/download` — 204 →
@@ -71,11 +74,11 @@ Data path:
   `application/octet-stream`); decrypt client-side with the content key.
 - Account/config: `/api/v3/users`, `/api/user-settings`, `/api/v2/feature-flags`.
 
-## STATUS (2026-07-22) — TIER C WORKS END-TO-END
+## Status — the REST path works end-to-end
 
-**Pure REST + env + own crypto: DECRYPTS REAL ENTRIES, no browser.** Validated
-against a known-plaintext new entry: fetched its ciphertext via `api.ts` and
-recovered the exact text with `d1.ts` + `crypto.ts`, entirely in Node.
+**Pure sync API + env + our own crypto: decrypts real entries, no browser.**
+Validated against a known-plaintext entry: fetched its ciphertext via `api.ts`
+and recovered the exact text with `d1.ts` + `crypto.ts`, entirely in Bun.
 
 - `api.ts` — pure `fetch` client (env: `DAYONE_API_TOKEN`/`X_USER_AGENT`/`DEVICE_INFO`):
   `getJournals()`, `getEntriesFeed(jid)`, `getEntryContent(jid, entryId)`.
@@ -149,6 +152,6 @@ unlock user key → per journal unwrap vault key → journal key → per entry u
 content key → decrypt. Validated: the primitives + D1 chain by synthetic
 roundtrips; the live end-to-end decrypt against a known-plaintext entry (with the
 cached user key). Remaining validation the user can run: point `reader.ts` at real
-`DAYONE_ENCRYPTION_KEY` + creds and diff against the JSON export / Tier A mirror.
+`DAYONE_ENCRYPTION_KEY` + creds and diff against the JSON export / browser-ingester mirror.
 
 Everything else (envelope byte order, AAD=none, salt provenance) is resolved above.
