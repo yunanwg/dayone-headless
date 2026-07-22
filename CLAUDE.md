@@ -20,8 +20,9 @@ web app (client-side E2EE decryption in JS), and we want that as a clean MCP.
 2. **Mirror** — SQLite shaped like Day One's official JSON export schema (stable
    contract). Also the portable backup.
 3. **Ingestion engine** (`src/ingest/…`) — gets + decrypts data into the mirror.
-   Swappable (Tier A headless web app → Tier C pure client). Swapping it must
-   never require touching the serving layer.
+   Swappable (REST ingester = production, pure HTTPS + own crypto; browser
+   ingester = dev/oracle, drives the web app; JSON-export importer). Swapping it
+   must never require touching the serving layer.
 
 If a change to the web/crypto side forces an edit in the serving layer, the
 decoupling has leaked — stop and fix the boundary.
@@ -29,11 +30,12 @@ decoupling has leaked — stop and fix the boundary.
 ## Build order (see README roadmap)
 
 1. **Phase 0 recon** — DevTools/CDP against the live web app: auth chain, entry
-   endpoints, `crypto.subtle.*` call inputs. Decides how hard Tier C is. **The
-   real unknown is auth anti-automation — probe it first.**
+   endpoints, `crypto.subtle.*` call inputs. Decides how hard the pure-REST path
+   is. **The real unknown is auth anti-automation — probe it first.**
 2. **Phase 1** — serving layer against a manual JSON export. Zero risk.
-3. **Phase 2** — Tier A ingestion.
-4. **Phase 3** — Tier C, built under A as oracle + golden conformance tests.
+3. **Phase 2** — browser ingestion (drives the web app).
+4. **Phase 3** — REST ingestion, built under the browser ingester as oracle +
+   golden conformance tests.
 
 Prefer Phase 1 as the first code: it's decoupled, portable, and needs nothing
 from Day One but one hand-exported JSON file.
@@ -68,7 +70,7 @@ committed** — so they are a leak surface too. Two rules:
   and audit the tree for stray tokens before pushing anywhere public. Do not rely
   on "it was redacted at the time."
 
-## Verifying crypto (Tier C)
+## Verifying crypto (REST ingester)
 
 Correctness is proven by **byte-identical conformance against the web app oracle**,
 not by "it looks decrypted." Same entries via our client and via the web app →

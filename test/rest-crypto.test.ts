@@ -1,5 +1,5 @@
 /**
- * Tier C crypto primitive tests — synthetic roundtrips only (generated keys /
+ * REST-ingester crypto primitive tests — synthetic roundtrips only (generated keys /
  * random data), never real Day One key material. The byte-identical conformance
  * against the live vault fingerprint oracle is exercised separately (needs a
  * session), not here.

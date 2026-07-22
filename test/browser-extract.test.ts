@@ -1,5 +1,5 @@
 /**
- * Tier A completeness gate — the guard against the lazy-cache gotcha (recon Q2:
+ * Browser-ingester completeness gate — the guard against the lazy-cache gotcha (recon Q2:
  * a journal can sit at 0 cached entries until force-loaded). Pure, synthetic.
  */
 

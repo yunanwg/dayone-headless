@@ -1,8 +1,12 @@
-# Tier A extractor — driving the web app to fill the mirror
+# Browser ingester — driving the web app to fill the mirror
 
-Pairs with `docs/browser-crosswalk.md` (the field mapping). This covers the
-*extraction*: getting the decrypted DODexie stores out of a driven Day One web
-app and into the mirror, safely and completely.
+> Design reference for the **browser ingester** (`src/ingest/browser/`), the
+> dev/oracle path. For how it fits the whole system, see
+> [architecture.md](architecture.md).
+
+Pairs with [browser-crosswalk.md](browser-crosswalk.md) (the field mapping). This
+covers the *extraction*: getting the decrypted DODexie stores out of a driven
+Day One web app and into the mirror, safely and completely.
 
 ## Pipeline
 
@@ -16,8 +20,8 @@ launch persistent Chromium (profile)          src/ingest/browser/run.ts
   → importExport() → mirror                     ingest/json-export/import.ts (reused)
 ```
 
-The serving layer is never touched — Tier A produces export-shaped objects and
-feeds the same importer the JSON path uses.
+The serving layer is never touched — the browser ingester produces export-shaped
+objects and feeds the same importer the JSON path uses.
 
 ## Auth (the project's #1 unknown)
 

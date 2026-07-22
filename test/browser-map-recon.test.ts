@@ -1,5 +1,5 @@
 /**
- * Tier A mapper — the two recon-driven rules wired after the mapper was drafted:
+ * Browser-ingester mapper — the two recon-driven rules wired after the mapper was drafted:
  * millisecond-stripped dates (Q5) and is_deleted exclusion (Q2). Synthetic
  * IndexedDB-shaped records only.
  */

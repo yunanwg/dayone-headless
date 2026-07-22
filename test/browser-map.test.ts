@@ -1,5 +1,5 @@
 /**
- * Tier A mapper tests.
+ * Browser-ingester mapper tests.
  *
  * Uses ONLY synthetic IndexedDB-shaped records constructed inline (snake_case,
  * epoch dates, 0/1 flags) — NEVER real journal content, per the project's

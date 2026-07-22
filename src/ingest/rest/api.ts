@@ -11,6 +11,8 @@
  * DAYONE_DEVICE_INFO. Secrets are read from env and never logged.
  */
 
+import { ApiError, AuthError, ConfigError } from "../../errors.ts";
+
 export interface Credentials {
   email: string;
   password: string;
@@ -49,7 +51,7 @@ export function apiConfigFromEnv(): DayOneApiConfig {
   const email = process.env.DAYONE_EMAIL;
   const password = process.env.DAYONE_PASSWORD;
   if (!token && !(email && password)) {
-    throw new Error("provide DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD to mint one");
+    throw new ConfigError("provide DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD to mint one");
   }
   const xUserAgent = process.env.DAYONE_X_USER_AGENT || DEFAULT_X_USER_AGENT;
   const deviceInfo =
@@ -75,9 +77,9 @@ export async function login(
     },
     body: JSON.stringify({ email: creds.email, password: creds.password }),
   });
-  if (!r.ok) throw new Error(`login failed: ${r.status}`);
+  if (!r.ok) throw new AuthError(`login failed: ${r.status} — check DAYONE_EMAIL / DAYONE_PASSWORD`);
   const j = (await r.json()) as { token?: string };
-  if (!j.token) throw new Error("login response had no token");
+  if (!j.token) throw new AuthError("login response had no token");
   return j.token;
 }
 
@@ -117,7 +119,8 @@ export class DayOneApi {
     if (!this.cfg.token) this.cfg.token = await this.renew();
   }
   private renew(): Promise<string> {
-    if (!this.cfg.credentials) throw new Error("token missing/expired and no credentials to renew");
+    if (!this.cfg.credentials)
+      throw new AuthError("token expired and no DAYONE_EMAIL/PASSWORD (or DAYONE_API_TOKEN) to renew");
     return login(this.cfg.credentials, {
       baseUrl: this.cfg.baseUrl,
       xUserAgent: this.cfg.xUserAgent,
@@ -138,14 +141,14 @@ export class DayOneApi {
 
   async getJournals(): Promise<any[]> {
     const r = await this.req("/api/v6/sync/journals");
-    if (!r.ok) throw new Error(`journals ${r.status}`);
+    if (!r.ok) throw new ApiError(`GET /api/v6/sync/journals → ${r.status}`, r.status);
     return r.json();
   }
 
   /** Entries feed (NDJSON-ish: one JSON object per line; some lines may be framing). */
   async getEntriesFeed(journalId: string): Promise<FeedItem[]> {
     const r = await this.req(`/api/v2/sync/entries/${journalId}/feed`);
-    if (!r.ok) throw new Error(`feed ${r.status}`);
+    if (!r.ok) throw new ApiError(`GET .../entries/${journalId}/feed → ${r.status}`, r.status);
     return (await r.text())
       .split("\n")
       .filter((l) => l.trim())
@@ -162,14 +165,14 @@ export class DayOneApi {
   /** Per-entry encrypted blob: `<JSON header>` ‖ `\n` ‖ D1 ciphertext. */
   async getEntryContent(journalId: string, entryId: string): Promise<Uint8Array> {
     const r = await this.req(`/api/v2/sync/entries/${journalId}/${entryId}`);
-    if (!r.ok) throw new Error(`entry ${entryId} ${r.status}`);
+    if (!r.ok) throw new ApiError(`GET entry ${entryId} → ${r.status}`, r.status);
     return new Uint8Array(await r.arrayBuffer());
   }
 
   /** The passphrase-wrapped user key material (for the full passphrase decrypt path). */
   async getUserKey(): Promise<{ publicKey: string; encryptedPrivateKey: string; fingerprint: string }> {
     const r = await this.req("/api/users/key");
-    if (!r.ok) throw new Error(`users/key ${r.status}`);
+    if (!r.ok) throw new ApiError(`GET /api/users/key → ${r.status}`, r.status);
     return r.json();
   }
 }

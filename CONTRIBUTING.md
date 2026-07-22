@@ -23,8 +23,8 @@ Before pushing, run the same gate CI runs:
 bun run check        # typecheck + lint + test
 ```
 
-Individual scripts: `bun run typecheck | lint | format | test`. Tests are
-`bun test` (currently 38 tests across 8 files).
+Individual scripts: `bun run typecheck | lint | format | test`. Tests run with
+`bun test`.
 
 ## Project layout
 
