@@ -44,7 +44,7 @@ to the web client or are counted differently before trusting Tier A as complete.
 
 | IndexedDB | export field | notes |
 |---|---|---|
-| `id` (18 chars) | `uuid` (32 hex) | **OPEN QUESTION — different id spaces.** The export uuid is 32-hex; the store id is 18 chars. Must resolve the mapping (derived? separate field? server id vs client uuid) before Tier A output can be conformance-checked against the export oracle. |
+| `id` (18 chars) | `uuid` (32 hex) | **Unrelated id spaces** (resolved): IndexedDB has no 32-hex uuid field. Tier A keys by the web `id` via `deriveUuid`; oracle/cross-ingester identity is content-based. See "Resolved / remaining questions". |
 | `body` | `text` | plaintext Markdown |
 | `rich_text_json` | `richText` | plaintext JSON `{meta,contents}` |
 | `date` (epoch) | `creationDate` | → ISO |
@@ -103,13 +103,34 @@ decrypted client-side). The mirror only needs `id` + `name`; keep the rest in
 ## `tags` → mirror `tag` / `entry_tag`
 Shape TBD (record truncated during recon; count 314). Reconcile before use.
 
-## Open questions to close before trusting Tier A
+## Tier A extraction requirements (from recon)
 
-1. **`entries.id` (18) vs export `uuid` (32)** — the id crosswalk. Blocks
-   byte-identical conformance against the export oracle.
-2. **3525 vs 3577 entry-count gap** — which journals/entries are missing from the
-   web client, and why.
-3. `medias` (8) vs `moments` (2459) — what is the `medias` store for.
-4. `tags` record shape.
-5. Do epoch dates carry the entry's local wall time or UTC? Cross-check against
-   `timezone` + the export's ISO values on the same entry.
+- **Completeness is NOT free — the IndexedDB cache is lazy.** Recon found the
+  `J4` journal present in `journals` (metadata + keys, `is_decrypted=1`)
+  but with **0 entries** in `entries`, exactly the 52-entry gap vs the export
+  (J1/J2/J3 matched to the record). The web client loads a journal's
+  entries on demand. So Tier A **must force-load every journal** (open each in the
+  driven web app, wait for sync) and then **verify per-journal counts** before
+  trusting the dump. Emit a loud warning on any shortfall — never silently ship a
+  partial mirror.
+- **Filter soft-deletes.** `entries.is_deleted` exists; skip `is_deleted` rows.
+- Other entries fields seen (keep in `raw` if surfaced, otherwise ignore):
+  `monthDayCombined`, `year` (web app precomputes on-this-day keys — mirrors our
+  own index), `reactions`, `is_shared`, `steps`, `feature_flags`, `client_meta`,
+  `promptID`, `templateID`, `activity`, `entry_type`, `revision_id`.
+
+## Resolved / remaining questions
+
+1. **RESOLVED — `entries.id` (18) vs export `uuid` (32).** The IndexedDB `entries`
+   record has **no 32-hex uuid field at all** (37 keys inspected; none hex-32).
+   The web id space and the export uuid space are unrelated. Consequences:
+   Tier A keys entries by the web `id` (via `deriveUuid`); **cross-ingester /
+   oracle identity must be content-based** (e.g. `creationDate`+`text` hash), not
+   uuid. Flag when mixing a Tier-A mirror with a JSON-export mirror — same entry,
+   different PK → dedupe by content.
+2. **RESOLVED — the 3525 vs 3577 gap is the entire `J4` journal** (lazy
+   cache, see above), not scattered missing entries.
+3. `medias` (8) vs `moments` (2459) — what is the `medias` store for. (open)
+4. `tags` record shape. (open)
+5. Do epoch dates carry local wall time or UTC? Cross-check `timezone` + the
+   export's ISO values on the same entry. (open)
