@@ -71,7 +71,45 @@ Data path:
   `application/octet-stream`); decrypt client-side with the content key.
 - Account/config: `/api/v3/users`, `/api/user-settings`, `/api/v2/feature-flags`.
 
-## Open unknowns (before Tier C can be built)
+## STATUS (2026-07-22)
+
+**REST + env: WORKING.** `src/ingest/tier-c/api.ts` is a pure-`fetch` (no browser)
+client driven by env (`DAYONE_API_TOKEN`, `DAYONE_X_USER_AGENT`, `DAYONE_DEVICE_INFO`).
+Verified from Node: `getJournals()`, `getEntriesFeed(jid)` (NDJSON revisions; each
+`revision.entryId` is the 32-hex export uuid + `contentLength`), and
+`getEntryContent(jid, entryId)` → the encrypted blob. This is the browser-free
+data path.
+
+**Content decryption: BLOCKED on the inner envelope layout.** Confirmed the
+`crypto.ts` primitives and the outer unwrap (user RSA → vault key, oracle-validated).
+But the innermost content decrypt is not yet cracked (see below).
+
+## D1 envelope format
+
+Every encrypted blob is `"D1"` (`44 31`) ‖ `ver`(`01`) ‖ `type`(1 byte) ‖ payload:
+- **type `01`** — PBKDF2/passphrase-wrapped (the user key, `content_keys.encryptedPrivateKey`). Salt lives in the payload.
+- **type `00`** — symmetric AES-GCM-wrapped (the journal content private key, `vault.keys[].encrypted_private_key`).
+- **type `02`** — RSA-hybrid (per-entry content). Payload appears to be `wrappedKey ‖ iv ‖ ct ‖ tag`.
+
+An entry content blob = `<JSON revision header>` ‖ `\n` ‖ `<D1 type-02 ciphertext>`
+(`contentLength` = the D1 part).
+
+## THE BLOCKER (content decryption)
+
+The oracle-validated **vault key does NOT decrypt** `vault.keys[].encrypted_private_key`
+(type 00) at any iv offset (scanned), nor the entry (type 02) directly. Tried for
+the entry: vault-key-direct, user-RSA-unwrap of the leading 256B, offset scans —
+all fail GCM tag validation. So the journal private key is wrapped by a key that
+is *not* the raw vault key (a derived KEK? a different vault member?), and without
+the journal private key the per-entry content key (type 02) can't be unwrapped.
+
+Cracking this needs a **correlated byte capture**: hook `crypto.subtle.decrypt` and
+record the exact (key, iv, ciphertext-prefix) while the app decrypts a KNOWN entry,
+then line those bytes up against its D1 blob. That requires forcing a fresh decrypt
+of a cached entry (no clean trigger found yet) or deeper bundle RE — beyond blind
+byte-boundary iteration. **This is the current stopping point.**
+
+## Open unknowns (before Tier C content decryption works)
 
 1. **Login → the 32-char `authorization` token.** The token SHAPE is known; how the
    email/password login mints it is not (the session was reused from the profile).
