@@ -39,18 +39,15 @@ export interface MappedJournal {
 }
 
 /**
- * Q1 — the one unresolved crosswalk mapping, isolated here so every other part
- * of the mapper is independent of how it resolves.
- *
- * `entries.id` in IndexedDB is 18 chars; the JSON-export `uuid` is 32 hex. They
- * live in different id spaces (client id vs export uuid) and the crosswalk from
- * one to the other is not yet known (derived? a separate field? server id vs
- * client uuid?). Until recon closes it we pass the store id through verbatim, so
- * the mirror is internally consistent (entry↔media FKs still join) even though
- * it is not yet byte-identical to the export oracle.
+ * The one unresolved mapping, isolated so the rest of the mapper is independent
+ * of it. The IndexedDB `entries.id` (18 chars) and the JSON-export `uuid` (32 hex)
+ * are different id spaces with no known crosswalk, so we pass the store id through
+ * verbatim: the mirror stays internally consistent (entry↔media FKs still join)
+ * but a browser-ingested mirror is not byte-identical to the export by uuid.
+ * (The REST ingester does not have this problem — its feed carries the 32-hex uuid.)
  */
 function deriveUuid(entryRecord: Rec): string {
-  // TODO(Q1): confirm id ↔ export-uuid mapping (parent resolving via recon)
+  // TODO: confirm the web-id ↔ export-uuid mapping; identity is content-based for now.
   return entryRecord.id;
 }
 
