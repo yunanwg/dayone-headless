@@ -50,6 +50,24 @@ from Day One but one hand-exported JSON file.
 - Commits may keep the `Co-Authored-By: Claude` trailer. PRs/issues: no AI
   signature (per the author's global convention).
 
+## Test data & open-source hygiene
+
+The mirror DB and real exports are gitignored, but **test code and fixtures are
+committed** — so they are a leak surface too. Two rules:
+
+- **Never hardcode real journal tokens** (names, places, real entry text, device
+  display names like `<Name>'s iPhone`) in tests, fixtures, comments, or commit
+  messages. Use synthetic placeholders only. Committed fixtures must be produced
+  by `scripts/redact-export.ts` from a gitignored real export; the redactor is
+  Unicode-aware (redacts CJK/accented text, not just ASCII) and default-denies
+  unmodeled string leaves. The real export never enters git.
+- **Before any public open-sourcing, start git history fresh.** Even redacted or
+  synthetic-looking data — and schema/field shapes derived from real entries —
+  accumulate across dev-stage commits. Treat the current history as
+  **private-only**: squash to a single clean initial commit (or re-init the repo)
+  and audit the tree for stray tokens before pushing anywhere public. Do not rely
+  on "it was redacted at the time."
+
 ## Verifying crypto (Tier C)
 
 Correctness is proven by **byte-identical conformance against the web app oracle**,
