@@ -13,11 +13,19 @@ byte-identical against the Tier A mirror oracle before it is trusted.
 passphrase (fixed, user-supplied)
   └─ PBKDF2(salt=22B, iterations=10000, hash=SHA-256)  → AES-256-GCM key  K_pass
        └─ AES-256-GCM(IV=12B) decrypt  content_keys.encryptedPrivateKey
-            → RSA private key  (PKCS8, ~1217B, RSA-OAEP, MGF hash=SHA-1, decrypt-only)
-                 └─ RSA-OAEP decrypt  each wrapped content/vault key (256B ciphertext ⇒ RSA-2048)
-                      → per-journal content key (AES-256)
-                           └─ AES-256-GCM(IV=12B) decrypt  entry bodies & attachment blobs
+            → USER RSA private key  (PKCS8, ~1217B, RSA-OAEP, MGF hash=SHA-1)
+                 └─ per journal, from vault_json.vault:
+                      grants[].encrypted_vault_key  (b64 344 ≈ RSA-2048 ct)
+                        └─ RSA-OAEP decrypt (user priv key)      → VAULT key (AES)
+                             └─ AES decrypt keys[].encrypted_private_key (b64 2336)
+                                  → JOURNAL content private key
+                                       └─ AES-256-GCM(IV=12B) decrypt entry bodies & attachment blobs
 ```
+
+The `vaults` store / `/journals` response carry `vault_json.vault = { keys[], grants[] }`:
+`grants[]` hold the vault key RSA-wrapped to each user's public key; `keys[]` hold
+the journal content keypair with its private key wrapped by the vault key. This
+matches the observed op counts (RSA-OAEP ×10 for grants/keys, AES-GCM ×25).
 
 Observed `crypto.subtle` calls on one forced decrypt (Media view): `deriveKey`
 PBKDF2 ×1, `decrypt` AES-GCM ×25, `importKey` pkcs8 (RSA-OAEP/SHA-1) ×2,
@@ -43,7 +51,15 @@ PBKDF2 ×1, `decrypt` AES-GCM ×25, `importKey` pkcs8 (RSA-OAEP/SHA-1) ×2,
 Note: IndexedDB caches these post-unlock; a pure Tier C client fetches the
 equivalents over REST (below) and runs the same chain.
 
-## REST map (host `dayone.me`, cookie/session auth)
+## Auth (API access)
+
+Every `/api/` request carries **`authorization: <32-char token>`** (no `Bearer`
+prefix — a raw 32-char session token), plus `x-user-agent` and `device-info`
+headers. A cookie-only `fetch()` gets **403** — the token header is required even
+for reads. So a pure-REST client needs that 32-char token; producing it is the
+login flow (below, unknown #1). Its shape is now known, which makes it scriptable.
+
+## REST map (host `dayone.me`)
 
 Data path:
 - `GET /api/v6/sync/journals` — journal list (+ vault/key material).
@@ -57,16 +73,22 @@ Data path:
 
 ## Open unknowns (before Tier C can be built)
 
-1. **Auth as pure HTTP.** The login→token flow was NOT captured (the session was
-   reused from the profile). Need a login recon: email/password (only that method)
-   → cookies/tokens. This is the remaining anti-automation question.
-2. **PBKDF2 salt provenance** — 22B salt; where stored/derived (near
+1. **Login → the 32-char `authorization` token.** The token SHAPE is known; how the
+   email/password login mints it is not (the session was reused from the profile).
+   Needs a login recon (email/password only — no Apple/Google). The last
+   anti-automation question.
+2. **Entry-feed ciphertext envelope** — `/api/v2/sync/entries/{id}/feed` is an
+   INCREMENTAL sync; on an already-synced profile it returns nothing (304/empty),
+   so the per-entry framing (ciphertext ‖ IV ‖ tag ‖ content-key ref) was not yet
+   captured. Capture via a from-zero cursor, a sync reset, or a fresh-profile first
+   sync. (Alternatively validate the AES-GCM path first on an **attachment** blob
+   from S3, which is fetched fresh each view.)
+3. **PBKDF2 salt provenance** — 22B salt; where stored/derived (near
    `encryptedPrivateKey`? per-user?).
-3. **AES-GCM AAD** — confirmed absent on observed calls; verify across entry vs
-   attachment decrypts.
-4. **Feed response schema** — exact JSON of `/api/v2/sync/entries/{id}/feed`:
-   how ciphertext, IV, and the wrapped/content-key reference are framed per entry.
-5. **Envelope format** — how IV‖ciphertext‖tag are concatenated in stored blobs.
+4. **AES-GCM AAD** — absent on observed calls; confirm across entry vs attachment.
+5. **Envelope byte order** — IV‖ciphertext‖tag concatenation in stored blobs.
+
+Resolved by recon: the vault/grant key hierarchy (above) and the API auth header.
 
 ## Build plan
 
