@@ -1,6 +1,6 @@
 {
   "name": "dayone-headless",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Headless, Mac-free, read-only Day One client — CLI + MCP server over a local decrypted mirror.",
   "type": "module",
   "private": true,
