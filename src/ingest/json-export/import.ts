@@ -77,8 +77,16 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
       raw = excluded.raw
   `);
   const insertFts = db.query(`INSERT INTO entry_fts (uuid, text) VALUES (?, ?)`);
-  // Idempotency: clear an entry's derived rows before re-inserting, so re-imports
-  // (full re-runs or incremental re-sync) never duplicate fts/media/tag links.
+  // uuid is intentionally UNINDEXED in the FTS table, so deleting once per
+  // entry would scan the whole table once per imported row. Pass the target
+  // UUIDs through SQLite's built-in JSON table function and clear them in one
+  // scan. This remains safe for partial imports: only UUIDs in this batch match.
+  const clearFtsForEntries = db.query(`
+    DELETE FROM entry_fts
+    WHERE uuid IN (SELECT value FROM json_each(?))
+  `);
+  // Duplicate UUIDs are invalid export input, but retain the previous
+  // last-occurrence-wins behaviour without penalising normal unique batches.
   const delFts = db.query(`DELETE FROM entry_fts WHERE uuid = ?`);
   const delMedia = db.query(`DELETE FROM media WHERE entry_uuid = ?`);
   const delEntryTags = db.query(`DELETE FROM entry_tag WHERE entry_uuid = ?`);
@@ -91,6 +99,11 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
   const tagIdCache = new Map<string, number>();
 
   const run = db.transaction((entries: DayOneEntry[]) => {
+    if (entries.length > 0) {
+      clearFtsForEntries.run(JSON.stringify(entries.map((entry) => entry.uuid)));
+    }
+    const ftsUuidsSeen = new Set<string>();
+
     // Clear media for every imported entry before inserting any replacement.
     // An identifier can move between entries; deleting per-entry during the
     // insertion pass would make the result depend on export order.
@@ -120,7 +133,8 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
       });
       stats.entries++;
 
-      delFts.run(e.uuid);
+      if (ftsUuidsSeen.has(e.uuid)) delFts.run(e.uuid);
+      else ftsUuidsSeen.add(e.uuid);
       if (e.text) insertFts.run(e.uuid, e.text);
 
       delEntryTags.run(e.uuid);
