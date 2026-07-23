@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
  * dayone-headless MCP server — read-only access to the local journal mirror. Pure
- * serving layer: it reads the SQLite mirror and knows nothing about Day One, the
- * network, or crypto. Every tool surfaces `synced_at` so an agent knows how fresh
- * the data is. Media BYTES are not served here — tools return media metadata only.
+ * serving layer: it reads the SQLite mirror (and the local media byte cache) and
+ * knows nothing about Day One, the network, or crypto. Every tool surfaces
+ * `synced_at` so an agent knows how fresh the data is. get_media serves decrypted
+ * bytes from the cache only — it never fetches or decrypts (that's the ingester).
  *
  * Transport: stdio by default (for local MCP clients that spawn the process). Set
  * DAYONE_MCP_PORT to serve streamable-HTTP instead (for an always-on homelab
@@ -23,7 +24,9 @@ import {
   listEntries,
   listJournals,
   listTags,
+  type MediaFile,
   onThisDay,
+  resolveMedia,
   searchEntries,
 } from "./queries.ts";
 
@@ -44,6 +47,14 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 });
+
+// Inline media cap: base64 inflates ~33%, and huge blobs bloat the context. Above
+// this, return the path/metadata instead of the bytes.
+const MAX_INLINE_MEDIA = 4 * 1024 * 1024;
+const mimeOf = (m: MediaFile): string =>
+  m.kind === "pdf"
+    ? "application/pdf"
+    : `${m.kind === "photo" ? "image" : m.kind}/${m.type ?? "octet-stream"}`;
 const todayMonthDay = () => {
   const n = new Date();
   return `${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
@@ -56,8 +67,9 @@ function buildServer(): McpServer {
       instructions:
         "Read-only access to a personal Day One journal mirror. Find entries with search_entries " +
         "(keyword/phrase) or list_entries (filter by journal/tag/date/place/starred), browse the " +
-        "facets with list_journals / list_tags, then get_entry for full content. `synced_at` on " +
-        "each result says how fresh the mirror is. This is READ-ONLY — you cannot create or edit entries.",
+        "facets with list_journals / list_tags, then get_entry for full content and get_media for " +
+        "an attachment's bytes. `synced_at` on each result says how fresh the mirror is. This is " +
+        "READ-ONLY — you cannot create or edit entries.",
     },
   );
 
@@ -133,8 +145,8 @@ function buildServer(): McpServer {
     "get_entry",
     {
       description:
-        "Get one entry's full content + metadata by uuid. For the entry's attached " +
-        "media use get_entry_media (this returns the entry body, not media bytes).",
+        "Get one entry's full content + metadata by uuid. For the entry's attached media, use " +
+        "get_entry_media (the metadata list) or get_media with a media identifier (the actual bytes).",
       inputSchema: { uuid: z.string().describe("entry uuid from search_entries / on_this_day") },
       annotations: READ_ONLY,
     },
@@ -151,13 +163,49 @@ function buildServer(): McpServer {
     {
       description:
         "List the media attached to an entry as METADATA ONLY (identifier, kind, md5, type, " +
-        "order) — never the photo/video/audio/pdf bytes. Empty for an entry with no attachments.",
+        "order) — never the photo/video/audio/pdf bytes. Feed an identifier to get_media for the " +
+        "bytes. Empty for an entry with no attachments.",
       inputSchema: {
         uuid: z.string().describe("entry uuid from search_entries / list_entries / on_this_day"),
       },
       annotations: READ_ONLY,
     },
     async ({ uuid }) => json({ synced_at: getSyncedAt(db), media: getEntryMedia(db, uuid) }),
+  );
+
+  server.registerTool(
+    "get_media",
+    {
+      description:
+        "Get the decrypted BYTES of one media attachment by its identifier (from get_entry_media). " +
+        "Photos under a size cap are returned inline as an image; other/large files return " +
+        "their local path + metadata. Bytes must be fetched first with the `daytwo media-fetch` CLI — " +
+        "if not cached, this reports how to populate it. Read-only: it never fetches.",
+      inputSchema: { identifier: z.string().describe("media identifier from an entry's media list") },
+      annotations: READ_ONLY,
+    },
+    async ({ identifier }) => {
+      const m = resolveMedia(db, identifier);
+      if (!m) return { content: [{ type: "text" as const, text: `no media: ${identifier}` }], isError: true };
+      if (!m.cached || !m.path) {
+        return json({ ...m, note: "bytes not cached — run `daytwo media-fetch` on the ingestion host" });
+      }
+      const bytes = new Uint8Array(await Bun.file(m.path).arrayBuffer());
+      if (m.kind === "photo" && bytes.length <= MAX_INLINE_MEDIA) {
+        return {
+          content: [
+            { type: "image" as const, data: Buffer.from(bytes).toString("base64"), mimeType: mimeOf(m) },
+          ],
+        };
+      }
+      // Too big or not an image: hand back where it is + how to read it.
+      return json({
+        ...m,
+        size: bytes.length,
+        mimeType: mimeOf(m),
+        note: "read the bytes from `path` locally",
+      });
+    },
   );
 
   server.registerTool(

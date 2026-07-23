@@ -99,6 +99,7 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo tags` | All tags with entry counts, most-used first. |
 | `daytwo get <uuid>` | One entry's full content + metadata. |
 | `daytwo media <uuid>` | Media metadata attached to an entry (never bytes). |
+| `daytwo media-file <id>` | Resolve a media identifier to its cached bytes path (after `media-fetch`). |
 | `daytwo on-this-day [MM-DD]` | Entries for a month-day across years (defaults to today). |
 
 `list` filters are all optional and ANDed together:
@@ -152,7 +153,7 @@ Add it to a stdio MCP client (e.g. Claude Desktop / Claude Code) roughly like:
 The reading MCP process needs only the mirror — no secrets. (Keep the secrets on
 whatever runs `sync`.)
 
-Tools exposed (all read-only; media is returned as metadata only, never bytes):
+Tools exposed (all read-only):
 
 - `list_journals` — journals + entry counts + `synced_at`.
 - `list_tags` — every tag with its entry count, most-used first.
@@ -160,8 +161,11 @@ Tools exposed (all read-only; media is returned as metadata only, never bytes):
   filters as `list_entries`; returns uuid, date, place, snippet.
 - `list_entries` — structured browse: filter by journal / tag / date range /
   place / starred, newest first, paginated. The complement to `search_entries`.
-- `get_entry` — full entry by uuid.
+- `get_entry` — full entry by uuid (media listed as metadata).
 - `get_entry_media` — media attached to an entry, as metadata only (never bytes).
+- `get_media` — the decrypted **bytes** of one attachment by identifier (photos
+  inline as an image; larger/other files as a local path). Serves from the cache
+  only — populate it with `media-fetch`; never fetches or decrypts.
 - `on_this_day` — entries matching a month-day across years.
 
 ## Deployment

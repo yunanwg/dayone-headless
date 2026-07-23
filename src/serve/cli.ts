@@ -13,6 +13,7 @@
  *   daytwo tags                 all tags with entry counts
  *   daytwo get <uuid>           one entry
  *   daytwo media <uuid>         media metadata attached to an entry
+ *   daytwo media-file <id>      resolve a media identifier to its cached bytes path
  *   daytwo on-this-day [MM-DD]  entries for a month-day across years
  *
  * `list` filters (all optional, ANDed):
@@ -31,6 +32,7 @@ import {
   listJournals,
   listTags,
   onThisDay,
+  resolveMedia,
   searchEntries,
 } from "./queries.ts";
 
@@ -199,6 +201,23 @@ switch (cmd) {
     break;
   }
 
+  case "media-file": {
+    const identifier = rest[0];
+    if (!identifier) {
+      console.error("usage: daytwo media-file <identifier>");
+      process.exit(1);
+    }
+    const db = requireMirror();
+    const media = resolveMedia(db, identifier);
+    db.close();
+    if (!media) {
+      console.error(`no media: ${identifier}`);
+      process.exit(2);
+    }
+    out(media); // { identifier, md5, kind, type, cached, path }
+    break;
+  }
+
   case "on-this-day": {
     const db = requireMirror();
     out({ synced_at: getSyncedAt(db), results: onThisDay(db, rest[0] ?? todayMonthDay()) });
@@ -208,7 +227,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | media-fetch [uuid] | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | on-this-day [MM-DD]",
+      "commands: sync | media-fetch [uuid] | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }
