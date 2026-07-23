@@ -16,6 +16,7 @@
     "mcp": "bun run src/serve/mcp.ts",
     "sync": "bun run src/ingest/rest/sync.ts",
     "import": "bun run src/ingest/json-export/import.ts",
+    "conformance": "bun run scripts/conformance.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src test scripts",
     "format": "biome check --write src test scripts",

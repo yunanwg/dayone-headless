@@ -193,6 +193,33 @@ Details, and the rationale for keeping two ingesters:
 [docs/architecture.md](docs/architecture.md). Protocol / crypto reference:
 [docs/protocol.md](docs/protocol.md).
 
+## Verifying decryption
+
+Correctness of the REST ingester's own crypto is proven, not assumed: the same
+entries decrypted by the REST path are compared against an **independent oracle**
+— a mirror built from Day One's official JSON export — and must come out
+identical on every decryption-critical field (entry text, rich text, tags, media
+identifiers, flags, and timed-entry dates). This is codec cross-validation.
+
+`scripts/conformance.ts` runs the comparison over two local mirrors (both
+gitignored — real journal data never enters the repo):
+
+```bash
+# oracle: import a hand-exported JSON journal into its own mirror
+DAYONE_MIRROR=exports/mirror-export.db bun run import path/to/Journal.json
+# subject: the REST-synced mirror
+bun run sync
+# compare — exits non-zero on any critical diff
+bun run conformance data/mirror.db exports/mirror-export.db
+```
+
+Fields that legitimately differ between the export and the live REST feed
+(coordinate float precision, export-only reverse-geocoded place names, media
+`type` naming, all-day-entry timezone anchoring) are classified as **benign** and
+reported for information only. The same check runs in `test/conformance.test.ts`
+when `CONFORMANCE_REST_DB` / `CONFORMANCE_EXPORT_DB` are set, and is skipped in CI
+where no real data exists.
+
 ## Security
 
 `dayone-headless` decrypts your **entire** journal. Secrets come only from the
