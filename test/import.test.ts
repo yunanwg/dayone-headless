@@ -75,6 +75,57 @@ test("raw column round-trips the source entry via getEntry", () => {
   db.close();
 });
 
+test("a tag repeated across many entries resolves to one cached tag id", () => {
+  // Guards the per-run tag-id cache in importExport: every occurrence of the
+  // same tag name across entries must resolve to the same row in `tag`,
+  // whether it's a cache hit or the first-seen insertTag+getTagId lookup.
+  const repeatedTagFixture: DayOneExport = {
+    metadata: { version: "1.0" },
+    entries: Array.from({ length: 5 }, (_, i) => ({
+      uuid: `REPEAT0000000000000000000000000${i}`,
+      creationDate: `2024-03-0${i + 1}T10:00:00Z`,
+      modifiedDate: `2024-03-0${i + 1}T10:00:00Z`,
+      timeZone: "UTC",
+      text: `Entry number ${i}.`,
+      tags: ["recurring", `unique-${i}`],
+      starred: false,
+      isPinned: false,
+      isAllDay: false,
+      creationDevice: "test",
+      creationDeviceType: "test",
+      creationOSName: "test",
+      creationOSVersion: "1.0",
+    })),
+  };
+  const db = freshMirror();
+  const stats = importExport(db, repeatedTagFixture, "repeat-tags");
+
+  expect(stats.entries).toBe(5);
+  expect(stats.tags).toBe(6); // "recurring" once + 5 distinct "unique-N"
+
+  const tagRow = db.query("SELECT id FROM tag WHERE name = 'recurring'").get() as { id: number };
+  const linkedIds = db
+    .query(
+      `SELECT DISTINCT tag_id FROM entry_tag et
+       JOIN tag t ON t.id = et.tag_id
+       WHERE t.name = 'recurring'`,
+    )
+    .all() as { tag_id: number }[];
+  expect(linkedIds).toEqual([{ tag_id: tagRow.id }]);
+
+  const linkCount = (
+    db
+      .query(
+        `SELECT COUNT(*) n FROM entry_tag et
+         JOIN tag t ON t.id = et.tag_id
+         WHERE t.name = 'recurring'`,
+      )
+      .get() as { n: number }
+  ).n;
+  expect(linkCount).toBe(5);
+  db.close();
+});
+
 test("FTS is populated for every entry with body text", () => {
   const db = freshMirror();
   importExport(db, sample, "sample");
