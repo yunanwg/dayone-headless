@@ -78,7 +78,7 @@ test("fetchChangedEntries: no batch barrier — one slow entry does not hold bac
 
 test("fetchChangedEntries: a failing entry (decrypt throws) does not abort the rest", async () => {
   const refs = [ref("A"), ref("B"), ref("BOOM"), ref("D"), ref("E")];
-  const { mapped, done } = await fetchChangedEntries(
+  const { mapped, done, failed } = await fetchChangedEntries(
     refs,
     async (r) => {
       if (r.entryId === "BOOM") throw new Error("decrypt failed");
@@ -88,17 +88,19 @@ test("fetchChangedEntries: a failing entry (decrypt throws) does not abort the r
   );
   expect(mapped.map((e) => e.uuid).sort()).toEqual(["A", "B", "D", "E"]);
   expect(done.map((r) => r.entryId).sort()).toEqual(["A", "B", "D", "E"]);
+  expect(failed).toBe(1);
 });
 
-test("fetchChangedEntries: an entry whose key is unavailable (null content) is skipped, not an error", async () => {
+test("fetchChangedEntries: an entry whose key is unavailable counts as incomplete", async () => {
   const refs = [ref("A"), ref("NOKEY"), ref("C")];
-  const { mapped, done } = await fetchChangedEntries(
+  const { mapped, done, failed } = await fetchChangedEntries(
     refs,
     async (r) => (r.entryId === "NOKEY" ? null : syntheticContent(r.entryId)),
     2,
   );
   expect(mapped.map((e) => e.uuid).sort()).toEqual(["A", "C"]);
   expect(done.map((r) => r.entryId).sort()).toEqual(["A", "C"]);
+  expect(failed).toBe(1);
 });
 
 test("fetchChangedEntries: concurrency 1 behaves like the old sequential path", async () => {

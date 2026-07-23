@@ -18,6 +18,7 @@
  */
 
 import { openMirror } from "../../serve/db/open.ts";
+import { recordSyncOutcome, recordSyncStart, type SyncState } from "../../sync-status.ts";
 import type { DayOneEntry } from "../../types.ts";
 import { importExport } from "../json-export/import.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
@@ -29,10 +30,17 @@ export interface SyncResult {
   journals: number;
   changed: number;
   removed: number;
-  syncedAt: string;
+  failed: number;
+  status: Exclude<SyncState, "unknown" | "running" | "failed">;
+  lastAttemptAt: string;
+  lastCompleteAt: string | null;
+  /** Backwards-compatible alias for the last complete sync, not the latest attempt. */
+  syncedAt: string | null;
 }
 
 const DEFAULT_SYNC_CONCURRENCY = 8;
+
+type SyncReader = Pick<RestReader, "unlockKeys" | "decryptJournalName" | "listEntries" | "decryptEntry">;
 
 /** `opts.concurrency` wins; else DAYONE_SYNC_CONCURRENCY; else the default. */
 function resolveConcurrency(opts: { concurrency?: number }): number {
@@ -45,29 +53,34 @@ function resolveConcurrency(opts: { concurrency?: number }): number {
  * Fetch + decrypt + map every ref in `toFetch` with bounded concurrency (a true
  * worker pool, not fixed-size batches with a barrier between them) — the slowest
  * entry in flight no longer stalls the rest of the pool's width. A per-entry
- * failure (fetch or decrypt) is caught here and that entry is simply skipped;
- * it must not fail the whole sync. Return order is completion order, not input
- * order — callers must not depend on it (writes here are keyed by uuid).
+ * failure (fetch, decrypt, missing key, parse, or map) is caught here and counted
+ * without retaining its identifier or error details. It must not abort the
+ * remaining entries, but the caller must mark the overall sync degraded. Return
+ * order is completion order, not input order — callers must not depend on it
+ * (writes here are keyed by uuid).
  */
 export async function fetchChangedEntries(
   toFetch: readonly EntryRef[],
   decrypt: (r: EntryRef) => Promise<string | null>,
   concurrency: number,
-): Promise<{ mapped: DayOneEntry[]; done: EntryRef[] }> {
+): Promise<{ mapped: DayOneEntry[]; done: EntryRef[]; failed: number }> {
   const mapped: DayOneEntry[] = [];
   const done: EntryRef[] = [];
+  let failed = 0;
   await runPool(toFetch, concurrency, async (r) => {
     try {
       const content = await decrypt(r);
       if (content) {
         mapped.push(mapEntry(JSON.parse(content), { editDate: r.editDate }));
         done.push(r);
+      } else {
+        failed++;
       }
     } catch {
-      // one bad entry must not fail the whole sync
+      failed++;
     }
   });
-  return { mapped, done };
+  return { mapped, done, failed };
 }
 
 /** Run an incremental sync into the mirror. `nowIso` is injectable for testing. */
@@ -78,17 +91,21 @@ export async function sync(
     nowIso?: string;
     concurrency?: number;
     onProgress?: (msg: string) => void;
+    /** Synthetic reader seam for deterministic tests; production leaves this unset. */
+    reader?: SyncReader;
   } = {},
 ): Promise<SyncResult> {
   const log = opts.onProgress ?? (() => {});
   const concurrency = resolveConcurrency(opts);
-  const reader = new RestReader(new DayOneApi(apiConfigFromEnv()), masterKey);
-
-  const keys = await reader.unlockKeys();
-  log(`unlocked ${keys.journalPrivByFingerprint.size} journal key(s)`);
-
+  const attemptedAt = opts.nowIso ?? new Date().toISOString();
   const db = openMirror(opts.mirrorPath, { writable: true });
+  recordSyncStart(db, attemptedAt, "rest");
+  let failed = 0;
   try {
+    const reader: SyncReader = opts.reader ?? new RestReader(new DayOneApi(apiConfigFromEnv()), masterKey);
+    const keys = await reader.unlockKeys();
+    log(`unlocked ${keys.journalPrivByFingerprint.size} journal key(s)`);
+
     const setSync = db.query(
       "INSERT INTO entry_sync (uuid, journal_id, revision_id) VALUES (?1, ?2, ?3) " +
         "ON CONFLICT(uuid) DO UPDATE SET journal_id = excluded.journal_id, revision_id = excluded.revision_id",
@@ -132,11 +149,13 @@ export async function sync(
 
       // Changed: new or bumped revisionId → re-fetch + decrypt (bounded concurrency).
       const toFetch = refs.filter((r) => !r.deleted && stored.get(r.entryId) !== r.revisionId);
-      const { mapped, done } = await fetchChangedEntries(
+      const result = await fetchChangedEntries(
         toFetch,
         (r) => reader.decryptEntry(j.id, r.entryId, keys),
         concurrency,
       );
+      const { mapped, done } = result;
+      failed += result.failed;
       if (mapped.length) {
         importExport(db, { metadata: { version: "rest" }, entries: mapped }, name);
         db.transaction((rs: EntryRef[]) => {
@@ -144,15 +163,37 @@ export async function sync(
         })(done);
         changed += mapped.length;
       }
-      log(`  ${name}: +${mapped.length} changed, -${remove.size} removed`);
+      log(
+        `  ${name}: +${mapped.length} changed, -${remove.size} removed` +
+          (result.failed ? `, !${result.failed} failed` : ""),
+      );
     }
 
-    const syncedAt = opts.nowIso ?? new Date().toISOString();
-    db.query(
-      "INSERT INTO meta (key, value) VALUES ('synced_at', ?1), ('source', 'rest') " +
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    ).run(syncedAt);
-    return { journals: journalCount, changed, removed, syncedAt };
+    const status = failed === 0 ? "complete" : "degraded";
+    const recorded = recordSyncOutcome(db, {
+      status,
+      attemptedAt,
+      failedEntries: failed,
+      source: "rest",
+    });
+    return {
+      journals: journalCount,
+      changed,
+      removed,
+      failed,
+      status,
+      lastAttemptAt: attemptedAt,
+      lastCompleteAt: recorded.last_complete_at,
+      syncedAt: recorded.last_complete_at,
+    };
+  } catch (error) {
+    recordSyncOutcome(db, {
+      status: "failed",
+      attemptedAt,
+      failedEntries: failed,
+      source: "rest",
+    });
+    throw error;
   } finally {
     db.close();
   }
@@ -164,7 +205,8 @@ if (import.meta.main) {
   const t0 = Date.now();
   const r = await sync(masterKey, { onProgress: (m) => console.error(m) });
   console.error(
-    `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${r.changed} changed, -${r.removed} removed ` +
-      `across ${r.journals} journals → mirror (synced_at ${r.syncedAt})`,
+    `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${r.changed} changed, -${r.removed} removed, ` +
+      `${r.failed} failed across ${r.journals} journals → mirror ` +
+      `(${r.status}; last_complete_at ${r.lastCompleteAt ?? "never"})`,
   );
 }

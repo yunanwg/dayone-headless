@@ -33,8 +33,10 @@ it as a clean CLI and MCP server over a local, decrypted **mirror**.
 - **CLI** — the same reads plus `sync` and a `doctor` health check.
 - **No Mac, no browser in production** — the shipping ingester is pure HTTPS +
   our own crypto. The Docker image contains no Chromium.
-- **Incremental sync** — first sync is full; after that only entries whose server
-  revision changed are re-fetched and re-decrypted.
+- **Incremental, completeness-aware sync** — first sync is full; after that only
+  entries whose server revision changed are re-fetched and re-decrypted. A
+  per-entry failure marks the attempt degraded without advancing the last
+  complete freshness timestamp, and the unchanged revision is retried next run.
 - **Full-text search** over entry bodies (SQLite FTS5), with a CJK-capable
   substring fallback so Chinese/Japanese/Korean queries recall correctly (FTS5's
   `unicode61` tokenizer does not segment CJK words — see *Search* below).
@@ -95,6 +97,7 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | Command | What it does |
 |---|---|
 | `daytwo sync` | Fetch, decrypt, and write the mirror (needs env). |
+| `daytwo sync-status` | Show whether the latest attempt is running, complete, degraded, or failed, with last-attempt / last-complete timestamps and aggregate failed-entry count. |
 | `daytwo media-fetch [uuid]` | Fetch + decrypt attachment **bytes** into `data/media/` (all, or one entry's). |
 | `daytwo mcp` | Run the read-only MCP server. stdio by default; streamable-HTTP if `DAYONE_MCP_PORT` is set. |
 | `daytwo doctor` | Config, mirror health, and local plaintext-permission check (reports secret *presence/shape*, never values). |
@@ -200,6 +203,10 @@ whatever runs `sync`.)
 
 Tools exposed (all read-only):
 
+- `get_sync_status` — check completeness before analysis: latest attempt status,
+  aggregate failed-entry count, and separate last-attempt / last-complete
+  timestamps. Running/degraded/failed attempts never advance `last_complete_at`;
+  `running` may also mean the previous process was interrupted before finalizing.
 - `get_stats` — the corpus map: entry counts, date span, and text volume grouped
   by year / month / journal (same filters as `list_entries`). The cheap first
   call for any longitudinal or overview question — no entry text is read.
@@ -223,6 +230,14 @@ Tools exposed (all read-only):
   inline as an image; larger/other files as a local path). Serves from the cache
   only — populate it with `media-fetch`; never fetches or decrypts.
 - `on_this_day` — entries matching a month-day across years.
+
+Read results keep the backwards-compatible top-level `synced_at` (the last
+complete snapshot) and add a `sync_status` object. If the latest attempt is
+degraded, successfully updated entries remain available, failed revisions stay
+pending for retry, and callers can avoid treating the mirror as complete.
+The ingester records `running` before network, decryption, or entry writes, so
+concurrent readers and post-crash readers never mistake an in-flight partial
+mirror for the last complete snapshot.
 
 ## Deployment
 

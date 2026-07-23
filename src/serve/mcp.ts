@@ -23,8 +23,9 @@ import {
   getEntries,
   getEntry,
   getEntryMedia,
+  getFreshness,
   getStats,
-  getSyncedAt,
+  getSyncStatus,
   InvalidSearchQueryError,
   listEntries,
   listJournals,
@@ -80,9 +81,25 @@ function buildServer(): McpServer {
         "(filter by journal/tag/date/place/starred; include_text to read bodies in bulk). Read " +
         "content with get_entry (one, curated) or get_entries (up to " +
         `${GET_ENTRIES_MAX}, with optional per-entry truncation). Browse facets with list_journals ` +
-        "/ list_tags; get an attachment's bytes with get_media. Every result carries `synced_at` " +
-        "(mirror freshness). READ-ONLY — you cannot create or edit entries.",
+        "/ list_tags; get an attachment's bytes with get_media. Call get_sync_status to verify " +
+        "completeness; read results retain `synced_at` and add `sync_status` freshness metadata. " +
+        "READ-ONLY — you cannot create or edit entries.",
     },
+  );
+
+  server.registerTool(
+    "get_sync_status",
+    {
+      description:
+        "Check mirror completeness and freshness before analysis. `status=complete` means the last " +
+        "attempt imported every changed entry. `degraded` means some entries failed but successful " +
+        "entries were retained; `failed` means the attempt could not finish; `running` means a sync " +
+        "is in flight or was interrupted before final status could be recorded. `last_complete_at` " +
+        "is the trustworthy corpus snapshot time and never advances on running/degraded/failed attempts.",
+      inputSchema: {},
+      annotations: READ_ONLY,
+    },
+    async () => json(getSyncStatus(db)),
   );
 
   server.registerTool(
@@ -92,7 +109,7 @@ function buildServer(): McpServer {
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    async () => json({ synced_at: getSyncedAt(db), journals: listJournals(db) }),
+    async () => json({ ...getFreshness(db), journals: listJournals(db) }),
   );
 
   server.registerTool(
@@ -117,8 +134,7 @@ function buildServer(): McpServer {
       },
       annotations: READ_ONLY,
     },
-    async ({ group_by, ...filters }) =>
-      json({ synced_at: getSyncedAt(db), ...getStats(db, group_by, filters) }),
+    async ({ group_by, ...filters }) => json({ ...getFreshness(db), ...getStats(db, group_by, filters) }),
   );
 
   server.registerTool(
@@ -157,7 +173,7 @@ function buildServer(): McpServer {
     },
     async ({ query, ...filters }) => {
       try {
-        return json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) });
+        return json({ ...getFreshness(db), results: searchEntries(db, query, filters) });
       } catch (err) {
         if (err instanceof InvalidSearchQueryError) {
           return {
@@ -207,7 +223,7 @@ function buildServer(): McpServer {
       },
       annotations: READ_ONLY,
     },
-    async (filters) => json({ synced_at: getSyncedAt(db), results: listEntries(db, filters) }),
+    async (filters) => json({ ...getFreshness(db), results: listEntries(db, filters) }),
   );
 
   server.registerTool(
@@ -218,7 +234,7 @@ function buildServer(): McpServer {
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    async () => json({ synced_at: getSyncedAt(db), tags: listTags(db) }),
+    async () => json({ ...getFreshness(db), tags: listTags(db) }),
   );
 
   server.registerTool(
@@ -249,7 +265,7 @@ function buildServer(): McpServer {
         includeRaw: include_raw,
       });
       return entry
-        ? json({ synced_at: getSyncedAt(db), entry })
+        ? json({ ...getFreshness(db), entry })
         : { content: [{ type: "text" as const, text: `no entry: ${uuid}` }], isError: true };
     },
   );
@@ -288,7 +304,7 @@ function buildServer(): McpServer {
     },
     async ({ uuids, max_chars, include_rich_text, include_raw }) =>
       json({
-        synced_at: getSyncedAt(db),
+        ...getFreshness(db),
         ...getEntries(db, uuids, {
           maxChars: max_chars,
           includeRichText: include_rich_text,
@@ -309,7 +325,7 @@ function buildServer(): McpServer {
       },
       annotations: READ_ONLY,
     },
-    async ({ uuid }) => json({ synced_at: getSyncedAt(db), media: getEntryMedia(db, uuid) }),
+    async ({ uuid }) => json({ ...getFreshness(db), media: getEntryMedia(db, uuid) }),
   );
 
   server.registerTool(
@@ -361,7 +377,7 @@ function buildServer(): McpServer {
       annotations: READ_ONLY,
     },
     async ({ month_day }) =>
-      json({ synced_at: getSyncedAt(db), results: onThisDay(db, month_day ?? todayMonthDay()) }),
+      json({ ...getFreshness(db), results: onThisDay(db, month_day ?? todayMonthDay()) }),
   );
 
   return server;
