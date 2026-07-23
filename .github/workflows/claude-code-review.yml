@@ -25,11 +25,12 @@ concurrency:
 
 jobs:
   claude-review:
-    # Skip drafts, and don't spend tokens reviewing Dependabot's bumps (the action
-    # also refuses to run for bot actors, which would just fail the job).
+    # Skip drafts and any bot-authored PR (Dependabot, release-please's
+    # github-actions bot, …). The action refuses bot actors and would just fail,
+    # and reviewing an automated bump/release PR isn't worth the tokens.
     if: >-
       github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
+      github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
