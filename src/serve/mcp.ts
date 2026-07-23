@@ -19,6 +19,9 @@ import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import { checkHttpGate, httpGateConfigFromEnv } from "./http-auth.ts";
 import {
+  ENTRY_UUID_MAX_CHARS,
+  GET_ENTRIES_DEFAULT_PER_ENTRY_CHARS,
+  GET_ENTRIES_DEFAULT_TOTAL_CHARS,
   GET_ENTRIES_MAX,
   getEntries,
   getEntry,
@@ -27,7 +30,10 @@ import {
   getStats,
   getSyncStatus,
   InvalidSearchQueryError,
-  listEntries,
+  LIST_ENTRIES_MAX,
+  LIST_TEXT_DEFAULT_PER_ENTRY_CHARS,
+  LIST_TEXT_DEFAULT_TOTAL_CHARS,
+  listEntriesPage,
   listJournals,
   listTags,
   type MediaFile,
@@ -36,6 +42,8 @@ import {
   SEARCH_QUERY_MAX_CHARS,
   SEARCH_QUERY_MAX_TERMS,
   searchEntries,
+  TEXT_BUDGET_MAX_PER_ENTRY_CHARS,
+  TEXT_BUDGET_MAX_TOTAL_CHARS,
 } from "./queries.ts";
 
 // Wait for the mirror to exist (a sibling `sync` may still be doing the first
@@ -80,7 +88,7 @@ function buildServer(): McpServer {
         "search_entries (keyword/phrase; handles Chinese and other CJK text) or list_entries " +
         "(filter by journal/tag/date/place/starred; include_text to read bodies in bulk). Read " +
         "content with get_entry (one, curated) or get_entries (up to " +
-        `${GET_ENTRIES_MAX}, with optional per-entry truncation). Browse facets with list_journals ` +
+        `${GET_ENTRIES_MAX}, with explicit per-entry and combined text budgets). Browse facets with list_journals ` +
         "/ list_tags; get an attachment's bytes with get_media. Call get_sync_status to verify " +
         "completeness; read results retain `synced_at` and add `sync_status` freshness metadata. " +
         "READ-ONLY — you cannot create or edit entries.",
@@ -199,10 +207,10 @@ function buildServer(): McpServer {
       description:
         "Structured browse (no text query) — filter entries by journal, tag, date range, " +
         "place, or starred, with pagination. Use this for 'my last N entries', 'everything tagged " +
-        "X in 2023', 'starred entries from Paris'. Set include_text=true to read whole bodies in " +
-        "bulk (each row carries text_length so you can gauge cost first); order_by=length surfaces " +
-        "the longest, most reflective entries. For keyword/phrase matching use search_entries. All " +
-        "filters AND together. Call get_entry / get_entries for a single entry's full detail.",
+        "X in 2023', 'starred entries from Paris'. Set include_text=true for bounded bulk bodies: " +
+        "every item reports Unicode-code-point truncation metadata, while page_info reports exact " +
+        "coverage and the next offset. order_by=length surfaces the longest, most reflective " +
+        "entries. For keyword/phrase matching use search_entries. All filters AND together.",
       inputSchema: {
         journal: z.string().optional().describe("exact journal name (see list_journals)"),
         tag: z.string().optional().describe("exact tag name (see list_tags)"),
@@ -213,17 +221,37 @@ function buildServer(): McpServer {
         include_text: z
           .boolean()
           .default(false)
-          .describe("return each entry's full text instead of a 140-char snippet (default false)"),
+          .describe("return bounded entry bodies instead of 140-char snippets (default false)"),
+        max_chars_per_entry: z
+          .number()
+          .int()
+          .min(1)
+          .max(TEXT_BUDGET_MAX_PER_ENTRY_CHARS)
+          .default(LIST_TEXT_DEFAULT_PER_ENTRY_CHARS)
+          .describe(
+            `body chars per entry when include_text=true (default ${LIST_TEXT_DEFAULT_PER_ENTRY_CHARS}, ` +
+              `max ${TEXT_BUDGET_MAX_PER_ENTRY_CHARS}; Unicode code points)`,
+          ),
+        max_total_chars: z
+          .number()
+          .int()
+          .min(1)
+          .max(TEXT_BUDGET_MAX_TOTAL_CHARS)
+          .default(LIST_TEXT_DEFAULT_TOTAL_CHARS)
+          .describe(
+            `combined body chars when include_text=true (default ${LIST_TEXT_DEFAULT_TOTAL_CHARS}, ` +
+              `max ${TEXT_BUDGET_MAX_TOTAL_CHARS}; Unicode code points)`,
+          ),
         order_by: z
           .enum(["date", "length", "editing_time"])
           .default("date")
           .describe("sort key, all newest/largest first: date (default) | length | editing_time"),
-        limit: z.number().int().min(1).max(200).default(50).describe("max results (default 50)"),
+        limit: z.number().int().min(1).max(LIST_ENTRIES_MAX).default(50).describe("max results (default 50)"),
         offset: z.number().int().min(0).default(0).describe("skip N results, for paging (default 0)"),
       },
       annotations: READ_ONLY,
     },
-    async (filters) => json({ ...getFreshness(db), results: listEntries(db, filters) }),
+    async (filters) => json({ ...getFreshness(db), ...listEntriesPage(db, filters) }),
   );
 
   server.registerTool(
@@ -275,13 +303,14 @@ function buildServer(): McpServer {
     {
       description:
         `Batch curated read — fetch up to ${GET_ENTRIES_MAX} entries by uuid in one call, in the ` +
-        "order given, each with the same curated shape as get_entry. Use it to read a set of hits " +
-        "from search_entries / list_entries at once instead of many get_entry calls. Set max_chars " +
-        "to cap each body (a truncation note reports how much was cut). Unknown uuids come back in " +
-        "`missing`, never as an error.",
+        "order given, each with the curated shape of get_entry. Use it to read a set of hits from " +
+        "search_entries / list_entries instead of many get_entry calls. Bodies are bounded per " +
+        "entry and across the batch, with explicit Unicode-code-point truncation metadata on every " +
+        "item. Unknown uuids come back in `missing`, never as an error. Heavy rich-text/raw fields " +
+        "are intentionally single-entry get_entry options.",
       inputSchema: {
         uuids: z
-          .array(z.string())
+          .array(z.string().max(ENTRY_UUID_MAX_CHARS))
           .min(1)
           .max(GET_ENTRIES_MAX)
           .describe(`entry uuids, in the order you want them back (max ${GET_ENTRIES_MAX})`),
@@ -289,28 +318,55 @@ function buildServer(): McpServer {
           .number()
           .int()
           .min(1)
-          .optional()
-          .describe("truncate each entry's text to this many chars (default: no truncation)"),
+          .max(TEXT_BUDGET_MAX_PER_ENTRY_CHARS)
+          .default(GET_ENTRIES_DEFAULT_PER_ENTRY_CHARS)
+          .describe(
+            `body chars per entry (default ${GET_ENTRIES_DEFAULT_PER_ENTRY_CHARS}, ` +
+              `max ${TEXT_BUDGET_MAX_PER_ENTRY_CHARS}; Unicode code points)`,
+          ),
+        max_total_chars: z
+          .number()
+          .int()
+          .min(1)
+          .max(TEXT_BUDGET_MAX_TOTAL_CHARS)
+          .default(GET_ENTRIES_DEFAULT_TOTAL_CHARS)
+          .describe(
+            `combined body chars across the batch (default ${GET_ENTRIES_DEFAULT_TOTAL_CHARS}, ` +
+              `max ${TEXT_BUDGET_MAX_TOTAL_CHARS}; Unicode code points)`,
+          ),
         include_rich_text: z
           .boolean()
           .default(false)
-          .describe("add rich-text JSON per entry (default false)"),
+          .describe("legacy option: true is rejected; use get_entry for one rich-text object"),
         include_raw: z
           .boolean()
           .default(false)
-          .describe("add the raw source object per entry (default false)"),
+          .describe("legacy option: true is rejected; use get_entry for one raw source object"),
       },
       annotations: READ_ONLY,
     },
-    async ({ uuids, max_chars, include_rich_text, include_raw }) =>
-      json({
+    async ({ uuids, max_chars, max_total_chars, include_rich_text, include_raw }) => {
+      if (include_rich_text || include_raw) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                "get_entries no longer returns rich_text or raw in a batch because those fields " +
+                "can multiply into an unbounded response. Call get_entry for one entry at a time.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      return json({
         ...getFreshness(db),
         ...getEntries(db, uuids, {
           maxChars: max_chars,
-          includeRichText: include_rich_text,
-          includeRaw: include_raw,
+          maxTotalChars: max_total_chars,
         }),
-      }),
+      });
+    },
   );
 
   server.registerTool(

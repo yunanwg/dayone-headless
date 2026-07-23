@@ -22,7 +22,8 @@
  * `list` (and `search` / `stats`) filters (all optional, ANDed):
  *   --journal <name> --tag <name> --starred --from <ISO> --to <ISO>
  *   --place <substr> --limit <n> --offset <n>
- *   --include-text (list only)  --order-by date|length|editing_time (list only)
+ *   --include-text --max-chars-per-entry <n> --max-total-chars <n> (list only)
+ *   --order-by date|length|editing_time (list only)
  */
 
 import { existsSync } from "node:fs";
@@ -35,7 +36,7 @@ import {
   getSyncStatus,
   InvalidSearchQueryError,
   type ListFilters,
-  listEntries,
+  listEntriesPage,
   listJournals,
   listTags,
   onThisDay,
@@ -90,6 +91,12 @@ function parseListFilters(argv: string[]): ListFilters {
         break;
       case "--include-text":
         f.include_text = true;
+        break;
+      case "--max-chars-per-entry":
+        f.max_chars_per_entry = Number(argv[++i]);
+        break;
+      case "--max-total-chars":
+        f.max_total_chars = Number(argv[++i]);
         break;
       case "--order-by": {
         const v = argv[++i];
@@ -233,7 +240,7 @@ switch (cmd) {
 
   case "list": {
     const db = requireMirror();
-    out({ ...getFreshness(db), results: listEntries(db, parseListFilters(rest)) });
+    out({ ...getFreshness(db), ...listEntriesPage(db, parseListFilters(rest)) });
     db.close();
     break;
   }
