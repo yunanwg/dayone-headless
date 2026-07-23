@@ -105,7 +105,7 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo journals` | List journals with entry counts and freshness. |
 | `daytwo stats <year\|month\|journal> [filters]` | Corpus map: entry counts, date span, and text volume per bucket. The cheap first look for a longitudinal question. |
 | `daytwo search <q> [limit] [filters]` | Full-text search (CJK-capable), optionally narrowed by the `list` filters. |
-| `daytwo list [filters]` | Structured browse — filter/paginate without a text query. `--include-text` returns full bodies; `--order-by date\|length\|editing_time`. |
+| `daytwo list [filters]` | Structured browse — filter/paginate without a text query. `--include-text` returns bounded bodies with explicit truncation metadata; `--order-by date\|length\|editing_time`. |
 | `daytwo tags` | All tags with entry counts, most-used first. |
 | `daytwo get <uuid> [--rich-text] [--raw]` | One entry, curated. `--rich-text` / `--raw` add the heavy fields. |
 | `daytwo media <uuid>` | Media metadata attached to an entry (never bytes). |
@@ -117,12 +117,15 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 ```
 daytwo list --journal <name> --tag <name> --starred \
             --from <ISO> --to <ISO> --place <substr> \
-            --limit <n> --offset <n>
+            --limit <n> --offset <n> \
+            --include-text --max-chars-per-entry <n> --max-total-chars <n>
 ```
 
 `--from`/`--to` bound `creation_date` (both inclusive; a bare `YYYY-MM-DD` `--to`
 covers the whole day). `--place` is a case-insensitive substring over place /
-locality / country. Newest first; page with `--limit`/`--offset`.
+locality / country. Newest first; page with `--limit`/`--offset`. List output
+includes `page_info` with `returned`, `has_more`, and `next_offset`; this avoids
+guessing whether a page covered the filtered result set.
 
 The same flags narrow `search`, so keyword and structure compose:
 
@@ -216,15 +219,21 @@ Tools exposed (all read-only):
   optionally narrowed by the same filters as `list_entries`; each hit returns
   uuid, date, place, journal, tags, `text_length`, and a snippet.
 - `list_entries` — structured browse: filter by journal / tag / date range /
-  place / starred, paginated. `include_text` returns full bodies for bulk
-  reading; `order_by` = `date` | `length` | `editing_time`. The complement to
-  `search_entries`.
+  place / starred, paginated. `include_text` returns bounded bodies for bulk
+  reading; defaults are 4,000 Unicode characters per entry and 24,000 across the
+  page. Every body reports `text_truncation`, while `page_info` reports
+  `returned`, `has_more`, and `next_offset`. `order_by` = `date` | `length` |
+  `editing_time`. The complement to `search_entries`.
 - `get_entry` — one entry as a curated, token-lean object (typed fields + inlined
   media metadata + `text_length`); `include_rich_text` / `include_raw` opt back
   into the heavy fields.
-- `get_entries` — batch curated read of up to 50 uuids in one call, in order,
-  with optional per-entry `max_chars` truncation; unknown uuids returned in
-  `missing`.
+- `get_entries` — batch curated read of up to 50 uuids in one call, in order.
+  Bodies default to 12,000 Unicode characters per entry and 60,000 across the
+  batch; each item reports exact original/returned counts and which budget
+  truncated it. Unknown uuids are returned in `missing`. Heavy rich-text/raw
+  fields stay on single-entry `get_entry` so a batch cannot silently multiply
+  them into an unbounded response; legacy batch flags are rejected with a
+  migration message instead of being silently ignored.
 - `get_entry_media` — media attached to an entry, as metadata only (never bytes).
 - `get_media` — the decrypted **bytes** of one attachment by identifier (photos
   inline as an image; larger/other files as a local path). Serves from the cache

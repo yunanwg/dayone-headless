@@ -14,6 +14,7 @@ import {
   getStats,
   InvalidSearchQueryError,
   listEntries,
+  listEntriesPage,
   listJournals,
   listTags,
   onThisDay,
@@ -188,6 +189,22 @@ test("listEntries paginates with limit + offset", () => {
   ]);
 });
 
+test("listEntriesPage reports exact non-final and final page coverage", () => {
+  const first = listEntriesPage(db, { limit: 2, offset: 0 });
+  expect(first.results).toHaveLength(2);
+  expect(first.page_info).toEqual({ returned: 2, has_more: true, next_offset: 2 });
+
+  const final = listEntriesPage(db, { limit: 2, offset: 2 });
+  expect(final.results).toHaveLength(2);
+  expect(final.page_info).toEqual({ returned: 2, has_more: false, next_offset: null });
+});
+
+test("listEntriesPage rejects pagination values that could stall or explode a CLI page", () => {
+  expect(() => listEntriesPage(db, { limit: 0 })).toThrow(/limit must be an integer/);
+  expect(() => listEntriesPage(db, { limit: 201 })).toThrow(/limit must be an integer/);
+  expect(() => listEntriesPage(db, { offset: -1 })).toThrow(/offset must be a non-negative integer/);
+});
+
 test("listEntries ANDs filters together", () => {
   // tag code + on/after 2023 → only the homelab entry.
   const hits = listEntries(db, { tag: "code", from: "2023-01-01" });
@@ -249,6 +266,76 @@ test("listEntries include_text returns full body; order_by=length sorts by LENGT
   }
 });
 
+test("listEntriesPage bounds emoji/CJK bodies per entry and across the page", () => {
+  const unicodeDb = openMirror(":memory:", { writable: true });
+  importExport(
+    unicodeDb,
+    {
+      metadata: { version: "1.0" },
+      entries: [
+        {
+          uuid: "PAGE0000000000000000000000000001",
+          creationDate: "2024-03-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "甲😀乙丙",
+        },
+        {
+          uuid: "PAGE0000000000000000000000000002",
+          creationDate: "2024-02-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "天地玄黄",
+        },
+        {
+          uuid: "PAGE0000000000000000000000000003",
+          creationDate: "2024-01-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "好",
+        },
+      ],
+    } as unknown as DayOneExport,
+    "unicode-page",
+  );
+
+  const first = listEntriesPage(unicodeDb, {
+    include_text: true,
+    limit: 2,
+    max_chars_per_entry: 3,
+    max_total_chars: 5,
+  });
+  expect(first.results[0]!.text).toBe("甲😀乙");
+  expect(first.results[0]!.text_truncation).toEqual({
+    truncated: true,
+    original_chars: 4,
+    returned_chars: 3,
+    limited_by: ["per_entry"],
+  });
+  expect(first.results[1]!.text).toBe("天地");
+  expect(first.results[1]!.text_truncation).toEqual({
+    truncated: true,
+    original_chars: 4,
+    returned_chars: 2,
+    limited_by: ["per_entry", "total"],
+  });
+  expect(first.page_info).toEqual({ returned: 2, has_more: true, next_offset: 2 });
+
+  const final = listEntriesPage(unicodeDb, {
+    include_text: true,
+    limit: 2,
+    offset: 2,
+    max_chars_per_entry: 3,
+    max_total_chars: 5,
+  });
+  expect(final.results[0]!.text).toBe("好");
+  expect(final.results[0]!.text_truncation).toEqual({
+    truncated: false,
+    original_chars: 1,
+    returned_chars: 1,
+    limited_by: [],
+  });
+  expect(final.page_info).toEqual({ returned: 1, has_more: false, next_offset: null });
+  unicodeDb.close();
+});
+
 test("getEntry returns a curated shape with typed columns + inlined media", () => {
   const e = getEntry(db, "AAAA1111BBBB2222CCCC3333DDDD4444")!;
   expect(e.journal).toBe("sample");
@@ -280,7 +367,7 @@ test("getEntry include_raw / include_rich_text opt back into heavy fields", () =
   expect((e.raw as { uuid: string }).uuid).toBe("AAAA1111BBBB2222CCCC3333DDDD4444");
 });
 
-test("getEntries batches in order, truncates text, reports missing", () => {
+test("getEntries batches in order, truncates text with metadata, and reports missing", () => {
   const { entries, missing } = getEntries(
     db,
     ["IIII9999JJJJ0000KKKK1111LLLL2222", "nope", "AAAA1111BBBB2222CCCC3333DDDD4444"],
@@ -292,9 +379,29 @@ test("getEntries batches in order, truncates text, reports missing", () => {
     "AAAA1111BBBB2222CCCC3333DDDD4444",
   ]);
   expect(missing).toEqual(["nope"]);
-  // Body truncated with a note; text_length still reflects the full length.
-  expect(entries[0]!.text).toContain("…[truncated");
+  // Body is bounded without an in-band note; metadata carries exact completeness.
+  expect(entries[0]!.text).toHaveLength(10);
   expect(entries[0]!.text_length).toBeGreaterThan(10);
+  expect(entries[0]!.text_truncation).toEqual({
+    truncated: true,
+    original_chars: entries[0]!.text_length,
+    returned_chars: 10,
+    limited_by: ["per_entry"],
+  });
+});
+
+test("getEntries bounds echoed missing identifiers and rejects legacy heavy batch fields", () => {
+  expect(() => getEntries(db, ["x".repeat(129)])).toThrow(/uuid must be at most 128/);
+  expect(() =>
+    getEntries(db, ["AAAA1111BBBB2222CCCC3333DDDD4444"], {
+      includeRaw: true,
+    }),
+  ).toThrow(/call getEntry for one entry at a time/);
+  expect(() =>
+    getEntries(db, ["AAAA1111BBBB2222CCCC3333DDDD4444"], {
+      includeRichText: true,
+    }),
+  ).toThrow(/call getEntry for one entry at a time/);
 });
 
 test("getEntries truncates by Unicode code points without splitting surrogate pairs", () => {
@@ -318,8 +425,60 @@ test("getEntries truncates by Unicode code points without splitting surrogate pa
   const { entries } = getEntries(unicodeDb, ["UNICODE000000000000000000000001"], {
     maxChars: 2,
   });
-  expect(entries[0]!.text).toBe("a😀…[truncated 1 more chars]");
+  expect(entries[0]!.text).toBe("a😀");
   expect(entries[0]!.text_length).toBe(3);
+  expect(entries[0]!.text_truncation).toEqual({
+    truncated: true,
+    original_chars: 3,
+    returned_chars: 2,
+    limited_by: ["per_entry"],
+  });
+  unicodeDb.close();
+});
+
+test("getEntries enforces a combined Unicode budget and reports no-truncation items", () => {
+  const unicodeDb = openMirror(":memory:", { writable: true });
+  importExport(
+    unicodeDb,
+    {
+      metadata: { version: "1.0" },
+      entries: [
+        {
+          uuid: "BATCH000000000000000000000000001",
+          creationDate: "2024-02-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "甲😀乙",
+        },
+        {
+          uuid: "BATCH000000000000000000000000002",
+          creationDate: "2024-01-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "天地玄",
+        },
+      ],
+    } as unknown as DayOneExport,
+    "unicode-batch",
+  );
+
+  const { entries } = getEntries(
+    unicodeDb,
+    ["BATCH000000000000000000000000001", "BATCH000000000000000000000000002"],
+    { maxChars: 3, maxTotalChars: 4 },
+  );
+  expect(entries[0]!.text).toBe("甲😀乙");
+  expect(entries[0]!.text_truncation).toEqual({
+    truncated: false,
+    original_chars: 3,
+    returned_chars: 3,
+    limited_by: [],
+  });
+  expect(entries[1]!.text).toBe("天");
+  expect(entries[1]!.text_truncation).toEqual({
+    truncated: true,
+    original_chars: 3,
+    returned_chars: 1,
+    limited_by: ["total"],
+  });
   unicodeDb.close();
 });
 

@@ -69,13 +69,23 @@ export interface EntrySummary {
   /** Contextual excerpt; absent when `text` (full body) is returned instead. */
   snippet?: string | null;
   /** Full entry body — only when listEntries is called with include_text. */
-  text?: string;
+  text?: string | null;
   /** LENGTH(text) so an agent can spot long reflective entries cheaply. */
   text_length?: number;
   /** Owning journal name (search + list). */
   journal?: string;
   /** Tags carried by the entry (search + list). */
   tags?: string[];
+  /** Present when a full body was requested through a bounded bulk-read surface. */
+  text_truncation?: TextTruncation;
+}
+
+export interface TextTruncation {
+  truncated: boolean;
+  original_chars: number;
+  returned_chars: number;
+  /** Empty when untruncated; otherwise names every budget that shortened the body. */
+  limited_by: ("per_entry" | "total")[];
 }
 
 /**
@@ -174,6 +184,10 @@ export interface ListFilters {
   offset?: number;
   /** Return each entry's full `text` instead of a 140-char snippet (listEntries only). */
   include_text?: boolean;
+  /** Per-entry full-text budget in Unicode code points (bounded bulk surfaces only). */
+  max_chars_per_entry?: number;
+  /** Combined full-text budget in Unicode code points (bounded bulk surfaces only). */
+  max_total_chars?: number;
   /** Sort key, all DESC. "date" (default) | "length" (LENGTH(text)) | "editing_time". */
   order_by?: "date" | "length" | "editing_time";
 }
@@ -245,6 +259,8 @@ export interface CuratedEntry {
   weather: { code: string | null; temperature_c: number | null } | null;
   media: MediaMeta[];
   text_length: number;
+  /** Always present on entries returned by the bounded getEntries bulk surface. */
+  text_truncation?: TextTruncation;
   /** Present only with includeRichText. */
   rich_text?: unknown;
   /** Present only with includeRaw. */
@@ -354,9 +370,15 @@ export function getEntry(db: Database, uuid: string, opts: GetEntryOptions = {})
   return entry;
 }
 
-export interface GetEntriesOptions extends GetEntryOptions {
-  /** Truncate each entry's text to this many chars, appending a truncation note. */
+export interface GetEntriesOptions {
+  /** Per-entry body budget in Unicode code points. */
   maxChars?: number;
+  /** Combined body budget across all returned entries, in Unicode code points. */
+  maxTotalChars?: number;
+  /** Retained only so legacy callers receive an explicit migration error. */
+  includeRichText?: boolean;
+  /** Retained only so legacy callers receive an explicit migration error. */
+  includeRaw?: boolean;
 }
 
 export interface GetEntriesResult {
@@ -367,6 +389,17 @@ export interface GetEntriesResult {
 
 /** Cap on how many uuids one getEntries call may request. */
 export const GET_ENTRIES_MAX = 50;
+/** Generous identifier bound; also caps how much missing-input data can be echoed. */
+export const ENTRY_UUID_MAX_CHARS = 128;
+
+/** Safe defaults keep bulk reads useful without silently flooding an agent context. */
+export const LIST_TEXT_DEFAULT_PER_ENTRY_CHARS = 4_000;
+export const LIST_TEXT_DEFAULT_TOTAL_CHARS = 24_000;
+export const GET_ENTRIES_DEFAULT_PER_ENTRY_CHARS = 12_000;
+export const GET_ENTRIES_DEFAULT_TOTAL_CHARS = 60_000;
+export const TEXT_BUDGET_MAX_PER_ENTRY_CHARS = 50_000;
+export const TEXT_BUDGET_MAX_TOTAL_CHARS = 100_000;
+export const LIST_ENTRIES_MAX = 200;
 
 /** Slice by Unicode code points so a non-BMP character is never split mid-surrogate. */
 function sliceCodePoints(value: string, maxCodePoints: number): string {
@@ -380,26 +413,86 @@ function sliceCodePoints(value: string, maxCodePoints: number): string {
   return value.slice(0, end);
 }
 
+/** Count Unicode code points (not UTF-16 code units). */
+function codePointLength(value: string): number {
+  let count = 0;
+  for (const _codePoint of value) count++;
+  return count;
+}
+
+function validateTextBudget(value: number, max: number, name: string): void {
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    throw new RangeError(`${name} must be an integer from 1 to ${max}`);
+  }
+}
+
+/**
+ * Apply per-entry and combined body budgets in result order. Metadata is explicit
+ * even when no truncation occurred; callers never need to infer completeness
+ * from punctuation or compare UTF-16 string lengths.
+ */
+function applyTextBudgets<T extends { text?: string | null; text_truncation?: TextTruncation }>(
+  entries: T[],
+  perEntryChars: number,
+  totalChars: number,
+): void {
+  validateTextBudget(perEntryChars, TEXT_BUDGET_MAX_PER_ENTRY_CHARS, "max chars per entry");
+  validateTextBudget(totalChars, TEXT_BUDGET_MAX_TOTAL_CHARS, "max total chars");
+
+  let remaining = totalChars;
+  for (const entry of entries) {
+    const text = entry.text;
+    const originalChars = text ? codePointLength(text) : 0;
+    const afterPerEntry = Math.min(originalChars, perEntryChars);
+    const returnedChars = Math.min(afterPerEntry, remaining);
+    const limitedBy: TextTruncation["limited_by"] = [];
+    if (originalChars > perEntryChars) limitedBy.push("per_entry");
+    if (afterPerEntry > remaining) limitedBy.push("total");
+
+    if (text && returnedChars < originalChars) {
+      entry.text = sliceCodePoints(text, returnedChars);
+    }
+    entry.text_truncation = {
+      truncated: returnedChars < originalChars,
+      original_chars: originalChars,
+      returned_chars: returnedChars,
+      limited_by: limitedBy,
+    };
+    remaining -= returnedChars;
+  }
+}
+
 /**
  * Batch curated read: resolve up to GET_ENTRIES_MAX uuids in the order requested,
- * optionally truncating each body to `maxChars`. Unknown uuids are returned in
- * `missing`, not thrown — a partial hit is still useful for bulk reading.
+ * with safe per-entry and combined body budgets. Unknown uuids are returned in
+ * `missing`, not thrown — a partial hit is still useful for bulk reading. Heavy
+ * raw/rich-text fields intentionally remain a single-entry getEntry concern.
  */
 export function getEntries(db: Database, uuids: string[], opts: GetEntriesOptions = {}): GetEntriesResult {
+  if (opts.includeRichText || opts.includeRaw) {
+    throw new RangeError(
+      "getEntries does not return rich_text or raw in a batch; call getEntry for one entry at a time",
+    );
+  }
+  if (uuids.some((uuid) => uuid.length > ENTRY_UUID_MAX_CHARS)) {
+    throw new RangeError(`entry uuid must be at most ${ENTRY_UUID_MAX_CHARS} characters`);
+  }
+
   const entries: CuratedEntry[] = [];
   const missing: string[] = [];
   for (const uuid of uuids.slice(0, GET_ENTRIES_MAX)) {
-    const entry = getEntry(db, uuid, opts);
+    const entry = getEntry(db, uuid);
     if (!entry) {
       missing.push(uuid);
       continue;
     }
-    if (opts.maxChars !== undefined && entry.text && entry.text_length > opts.maxChars) {
-      const extra = entry.text_length - opts.maxChars;
-      entry.text = `${sliceCodePoints(entry.text, opts.maxChars)}…[truncated ${extra} more chars]`;
-    }
     entries.push(entry);
   }
+  applyTextBudgets(
+    entries,
+    opts.maxChars ?? GET_ENTRIES_DEFAULT_PER_ENTRY_CHARS,
+    opts.maxTotalChars ?? GET_ENTRIES_DEFAULT_TOTAL_CHARS,
+  );
   return { entries, missing };
 }
 
@@ -662,6 +755,57 @@ export function listEntries(db: Database, filters: ListFilters = {}): EntrySumma
     ...e,
     tags: splitTags(tag_list),
   }));
+}
+
+export interface PageInfo {
+  /** Number of rows in this page (independent of text-budget truncation). */
+  returned: number;
+  /** True when at least one more row exists after this page. */
+  has_more: boolean;
+  /** Offset for the next call, or null at the end of the result set. */
+  next_offset: number | null;
+}
+
+export interface ListEntriesPage {
+  results: EntrySummary[];
+  page_info: PageInfo;
+}
+
+/**
+ * Public bulk-browse surface: fetch one look-ahead row for exact page coverage,
+ * then apply explicit Unicode-safe text budgets when full bodies were requested.
+ * A full COUNT is intentionally avoided; it would repeat the filtered scan only
+ * to provide non-essential metadata.
+ */
+export function listEntriesPage(db: Database, filters: ListFilters = {}): ListEntriesPage {
+  const limit = filters.limit ?? 50;
+  const offset = filters.offset ?? 0;
+  if (!Number.isInteger(limit) || limit < 1 || limit > LIST_ENTRIES_MAX) {
+    throw new RangeError(`limit must be an integer from 1 to ${LIST_ENTRIES_MAX}`);
+  }
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new RangeError("offset must be a non-negative integer");
+  }
+  const rows = listEntries(db, { ...filters, limit: limit + 1 });
+  const hasMore = rows.length > limit;
+  const results = rows.slice(0, limit);
+
+  if (filters.include_text) {
+    applyTextBudgets(
+      results,
+      filters.max_chars_per_entry ?? LIST_TEXT_DEFAULT_PER_ENTRY_CHARS,
+      filters.max_total_chars ?? LIST_TEXT_DEFAULT_TOTAL_CHARS,
+    );
+  }
+
+  return {
+    results,
+    page_info: {
+      returned: results.length,
+      has_more: hasMore,
+      next_offset: hasMore ? offset + results.length : null,
+    },
+  };
 }
 
 /** All tags with how many entries carry each, most-used first. */
