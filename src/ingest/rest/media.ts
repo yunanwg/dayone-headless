@@ -22,7 +22,7 @@ import { RestReader } from "./reader.ts";
 
 const md5hex = (b: Uint8Array): string => createHash("md5").update(b).digest("hex");
 
-interface MediaJob {
+export interface MediaJob {
   identifier: string;
   md5: string | null;
   kind: string;
@@ -42,10 +42,12 @@ export interface MediaSyncStats {
 export interface MediaSyncOptions {
   /** Only this entry's media (by uuid); default: all media in the mirror. */
   entryUuid?: string;
-  /** Cap the number of NEW downloads (for bounded / test runs). */
+  /** Exact cap on NEW download attempts (for bounded / test runs). */
   limit?: number;
   /** Bounded worker-pool size; default 6 (or DAYONE_MEDIA_CONCURRENCY). */
   concurrency?: number;
+  /** Media cache dir override (tests); default is the standard cache dir. */
+  cacheDir?: string;
   onProgress?: (msg: string) => void;
 }
 
@@ -72,8 +74,16 @@ function loadJobs(entryUuid?: string): MediaJob[] {
   return jobs;
 }
 
-export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}): Promise<MediaSyncStats> {
-  const jobs = loadJobs(opts.entryUuid);
+/**
+ * Core fetch loop over a worklist, with the byte fetcher injected — so the
+ * pool/limit/verify/cache logic is testable without network or crypto.
+ * `fetchBytes` is called exactly once per attempted download.
+ */
+export async function runMediaJobs(
+  jobs: MediaJob[],
+  fetchBytes: (job: MediaJob) => Promise<Uint8Array>,
+  opts: MediaSyncOptions = {},
+): Promise<MediaSyncStats> {
   const stats: MediaSyncStats = {
     total: jobs.length,
     alreadyCached: 0,
@@ -84,45 +94,37 @@ export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}):
     bytes: 0,
   };
 
-  const api = new DayOneApi(apiConfigFromEnv());
-  await api.ensureToken();
-  const reader = new RestReader(api, masterKey);
-  const keys = await reader.unlockKeys();
-
   // Jobs that need no network round-trip (no md5 / already cached) are filtered
   // up front so they never occupy a worker slot; only real fetches go through
   // the bounded-concurrency pool below.
-  const eligible: MediaJob[] = [];
+  const eligible: (MediaJob & { md5: string })[] = [];
   for (const job of jobs) {
     if (!job.md5) {
       stats.skippedNoMd5++;
       continue;
     }
-    if (isMediaCached(job.md5)) {
+    if (isMediaCached(job.md5, opts.cacheDir)) {
       stats.alreadyCached++;
       continue;
     }
-    eligible.push(job);
+    eligible.push(job as MediaJob & { md5: string });
   }
 
-  // `limit` caps NEW downloads: once reached, remaining pool turns become cheap
-  // no-ops (checked before any network call) rather than stopping the pool
-  // outright — simplest way to honor the cap under concurrent workers.
-  let limitReached = false;
-  await runPool(eligible, resolveConcurrency(opts), async (job) => {
-    if (limitReached) return;
-    if (opts.limit !== undefined && stats.fetched >= opts.limit) {
-      limitReached = true;
-      return;
-    }
+  // `limit` is an EXACT cap on download attempts: every eligible job triggers
+  // exactly one fetch, so truncating the worklist before the pool starts
+  // reserves the slots synchronously — concurrent workers can never start a
+  // fetch beyond the cap (unlike gating on a post-completion counter).
+  const work = opts.limit !== undefined ? eligible.slice(0, Math.max(0, opts.limit)) : eligible;
+
+  await runPool(work, resolveConcurrency(opts), async (job) => {
     try {
-      const bytes = await reader.fetchMedia(job.journalId, job.identifier, keys);
+      const bytes = await fetchBytes(job);
       if (md5hex(bytes) !== job.md5) {
         stats.md5Mismatch++;
         opts.onProgress?.(`md5 mismatch for ${job.kind} ${job.identifier.slice(0, 8)}… — not cached`);
         return;
       }
-      await Bun.write(prepareMediaPath(job.md5), bytes);
+      await Bun.write(prepareMediaPath(job.md5, opts.cacheDir), bytes);
       stats.fetched++;
       stats.bytes += bytes.length;
       opts.onProgress?.(`cached ${job.kind} ${job.identifier.slice(0, 8)}… (${bytes.length} B)`);
@@ -133,4 +135,15 @@ export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}):
     }
   });
   return stats;
+}
+
+export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}): Promise<MediaSyncStats> {
+  const jobs = loadJobs(opts.entryUuid);
+
+  const api = new DayOneApi(apiConfigFromEnv());
+  await api.ensureToken();
+  const reader = new RestReader(api, masterKey);
+  const keys = await reader.unlockKeys();
+
+  return runMediaJobs(jobs, (job) => reader.fetchMedia(job.journalId, job.identifier, keys), opts);
 }
