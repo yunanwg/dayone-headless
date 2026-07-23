@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS entry_sync (
   revision_id TEXT
 );
 
+-- Incremental sync loads the whole per-journal `entry_sync` set every run
+-- (see src/ingest/rest/sync.ts); without this, that's a full table scan.
+CREATE INDEX IF NOT EXISTS entry_sync_journal_idx ON entry_sync(journal_id);
+
 CREATE TABLE IF NOT EXISTS tag (
   id    INTEGER PRIMARY KEY,
   name  TEXT NOT NULL UNIQUE
@@ -94,8 +98,9 @@ CREATE TABLE IF NOT EXISTS media (
 
 CREATE INDEX IF NOT EXISTS media_entry_idx ON media(entry_uuid);
 
--- Full-text search over entry bodies. Rebuilt on import; contentless-external
--- so we don't duplicate the body — points back at entry.rowid via uuid mapping.
+-- Full-text search over entry bodies. Rebuilt on import; plain FTS5 with its own
+-- stored copy of `text` (not contentless) — the duplication costs some disk but
+-- means snippet()/highlight() work directly off the index, no join back to entry.
 CREATE VIRTUAL TABLE IF NOT EXISTS entry_fts USING fts5(
   uuid UNINDEXED,
   text,

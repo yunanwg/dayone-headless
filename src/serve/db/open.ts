@@ -22,6 +22,16 @@ export function openMirror(path = DEFAULT_MIRROR, opts: { writable?: boolean } =
     create: opts.writable === true,
   });
   db.exec("PRAGMA foreign_keys = ON;");
+  // The MCP reader shares this file with the sync writer; without a busy_timeout
+  // a WAL checkpoint on the writer's side can hand the reader SQLITE_BUSY
+  // immediately instead of retrying. 5s is enough to ride out a checkpoint.
+  db.exec("PRAGMA busy_timeout = 5000;");
+  if (!opts.writable) {
+    // Read-only opens: belt-and-suspenders against any write ever reaching this
+    // connection (the `readonly: true` option above already prevents it at the
+    // file level; this rejects at the SQL layer too).
+    db.exec("PRAGMA query_only = ON;");
+  }
   if (opts.writable) {
     db.exec(readFileSync(SCHEMA_PATH, "utf8"));
   }

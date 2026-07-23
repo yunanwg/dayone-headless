@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { isMediaCached, prepareMediaPath } from "../../media-cache.ts";
 import { openMirror } from "../../serve/db/open.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
+import { runPool } from "./pool.ts";
 import { RestReader } from "./reader.ts";
 
 const md5hex = (b: Uint8Array): string => createHash("md5").update(b).digest("hex");
@@ -43,7 +44,17 @@ export interface MediaSyncOptions {
   entryUuid?: string;
   /** Cap the number of NEW downloads (for bounded / test runs). */
   limit?: number;
+  /** Bounded worker-pool size; default 6 (or DAYONE_MEDIA_CONCURRENCY). */
+  concurrency?: number;
   onProgress?: (msg: string) => void;
+}
+
+const DEFAULT_MEDIA_CONCURRENCY = 6;
+
+function resolveConcurrency(opts: MediaSyncOptions): number {
+  if (opts.concurrency !== undefined) return Math.max(1, opts.concurrency);
+  const fromEnv = Number(process.env.DAYONE_MEDIA_CONCURRENCY);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : DEFAULT_MEDIA_CONCURRENCY;
 }
 
 /** Read the media worklist (identifier + plaintext md5 + Day One journal id). */
@@ -78,6 +89,10 @@ export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}):
   const reader = new RestReader(api, masterKey);
   const keys = await reader.unlockKeys();
 
+  // Jobs that need no network round-trip (no md5 / already cached) are filtered
+  // up front so they never occupy a worker slot; only real fetches go through
+  // the bounded-concurrency pool below.
+  const eligible: MediaJob[] = [];
   for (const job of jobs) {
     if (!job.md5) {
       stats.skippedNoMd5++;
@@ -87,22 +102,35 @@ export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}):
       stats.alreadyCached++;
       continue;
     }
-    if (opts.limit !== undefined && stats.fetched >= opts.limit) break;
+    eligible.push(job);
+  }
+
+  // `limit` caps NEW downloads: once reached, remaining pool turns become cheap
+  // no-ops (checked before any network call) rather than stopping the pool
+  // outright — simplest way to honor the cap under concurrent workers.
+  let limitReached = false;
+  await runPool(eligible, resolveConcurrency(opts), async (job) => {
+    if (limitReached) return;
+    if (opts.limit !== undefined && stats.fetched >= opts.limit) {
+      limitReached = true;
+      return;
+    }
     try {
       const bytes = await reader.fetchMedia(job.journalId, job.identifier, keys);
       if (md5hex(bytes) !== job.md5) {
         stats.md5Mismatch++;
         opts.onProgress?.(`md5 mismatch for ${job.kind} ${job.identifier.slice(0, 8)}… — not cached`);
-        continue;
+        return;
       }
       await Bun.write(prepareMediaPath(job.md5), bytes);
       stats.fetched++;
       stats.bytes += bytes.length;
       opts.onProgress?.(`cached ${job.kind} ${job.identifier.slice(0, 8)}… (${bytes.length} B)`);
     } catch (err) {
+      // One failed download must not abort the rest of the pool.
       stats.failed++;
       opts.onProgress?.(`failed ${job.identifier.slice(0, 8)}…: ${(err as Error).message}`);
     }
-  }
+  });
   return stats;
 }

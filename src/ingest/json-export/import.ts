@@ -62,6 +62,10 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
 
   const stats: ImportStats = { journal: journalName, entries: 0, media: 0, tags: 0 };
   const tagsSeen = new Set<string>();
+  // Resolved tag ids for this import run: most tags recur across many entries,
+  // so cache each name's id after its first insertTag+getTagId instead of
+  // re-querying on every occurrence.
+  const tagIdCache = new Map<string, number>();
 
   const run = db.transaction((entries: DayOneEntry[]) => {
     for (const e of entries) {
@@ -93,8 +97,12 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
 
       delEntryTags.run(e.uuid);
       for (const name of e.tags ?? []) {
-        insertTag.run(name);
-        const tagId = (getTagId.get(name) as { id: number }).id;
+        let tagId = tagIdCache.get(name);
+        if (tagId === undefined) {
+          insertTag.run(name);
+          tagId = (getTagId.get(name) as { id: number }).id;
+          tagIdCache.set(name, tagId);
+        }
         linkTag.run(e.uuid, tagId);
         if (!tagsSeen.has(name)) {
           tagsSeen.add(name);
