@@ -1,0 +1,64 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for the report. **Never paste secrets or journal content** — no
+        encryption key (`D1-…`), API token, email/password, or decrypted entry
+        text. Redact anything sensitive before pasting logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or git commit SHA you're on.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: How are you running it?
+      options:
+        - CLI (daytwo …)
+        - MCP server — stdio
+        - MCP server — HTTP
+        - Docker / docker compose
+    validations:
+      required: true
+  - type: dropdown
+    id: ingester
+    attributes:
+      label: Which ingester?
+      description: Production is the REST ingester; the browser one is dev/oracle only.
+      options:
+        - REST (default / production)
+        - Browser (dev / oracle)
+        - JSON export import
+        - "Not sure / N/A"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you expected vs. what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (secrets redacted)
+      render: shell
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I ran `daytwo doctor` and it didn't explain the problem.
+        - label: My logs/output contain no secrets or journal content.
+          required: true

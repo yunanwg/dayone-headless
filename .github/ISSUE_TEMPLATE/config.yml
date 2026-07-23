@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/yunanwg/dayone-headless/security/advisories/new
+    about: >-
+      Report privately via a GitHub Security Advisory — do NOT open a public
+      issue. This tool decrypts your entire journal; treat security seriously.
+  - name: 📖 Documentation
+    url: https://github.com/yunanwg/dayone-headless#readme
+    about: Setup, deployment, and architecture are covered in the README and docs/.
