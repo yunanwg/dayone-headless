@@ -14,6 +14,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { hardenPrivateFile, installPrivateUmask, PRIVATE_FILE_MODE } from "../../local-permissions.ts";
 import { isMediaCached, isValidMd5, prepareMediaPath } from "../../media-cache.ts";
 import { openMirror } from "../../serve/db/open.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
@@ -127,7 +129,10 @@ export async function runMediaJobs(
         opts.onProgress?.(`md5 mismatch for ${job.kind} ${job.identifier.slice(0, 8)}… — not cached`);
         return;
       }
-      await Bun.write(prepareMediaPath(job.md5, opts.cacheDir), bytes);
+      const path = prepareMediaPath(job.md5, opts.cacheDir);
+      installPrivateUmask();
+      await writeFile(path, bytes, { mode: PRIVATE_FILE_MODE });
+      hardenPrivateFile(path);
       stats.fetched++;
       stats.bytes += bytes.length;
       opts.onProgress?.(`cached ${job.kind} ${job.identifier.slice(0, 8)}… (${bytes.length} B)`);

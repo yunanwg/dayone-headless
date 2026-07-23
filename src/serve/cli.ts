@@ -7,6 +7,7 @@
  *   daytwo media-fetch [uuid]   fetch + decrypt attachment BYTES into data/media
  *   daytwo mcp                  run the read-only MCP server (stdio)
  *   daytwo doctor               check config + mirror health
+ *   daytwo doctor --fix-permissions  tighten existing local plaintext paths
  *   daytwo journals             list journals + counts + freshness
  *   daytwo stats <group_by>     corpus map: counts/text volume by year|month|journal
  *   daytwo search <q> [limit]   full-text search (CJK-capable)
@@ -144,7 +145,12 @@ switch (cmd) {
 
   case "doctor": {
     const { doctor } = await import("./doctor.ts");
-    process.exit(await doctor());
+    const unknown = rest.filter((arg) => arg !== "--fix-permissions");
+    if (unknown.length) {
+      console.error(`unknown doctor option: ${unknown[0]}`);
+      process.exit(1);
+    }
+    process.exit(await doctor({ fixPermissions: rest.includes("--fix-permissions") }));
     break;
   }
 

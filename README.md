@@ -54,6 +54,7 @@ cd dayone-headless
 bun install
 
 cp .env.example .env        # then fill in the secrets below
+chmod 600 .env              # owner-only: it holds the master key and account auth
 ```
 
 Set at minimum, in `.env`:
@@ -96,7 +97,8 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo sync` | Fetch, decrypt, and write the mirror (needs env). |
 | `daytwo media-fetch [uuid]` | Fetch + decrypt attachment **bytes** into `data/media/` (all, or one entry's). |
 | `daytwo mcp` | Run the read-only MCP server. stdio by default; streamable-HTTP if `DAYONE_MCP_PORT` is set. |
-| `daytwo doctor` | Config + mirror health self-check (reports secret *presence/shape*, never values). |
+| `daytwo doctor` | Config, mirror health, and local plaintext-permission check (reports secret *presence/shape*, never values). |
+| `daytwo doctor --fix-permissions` | Explicitly tighten existing mirror/cache paths after reviewing the diagnostic. |
 | `daytwo journals` | List journals with entry counts and freshness. |
 | `daytwo stats <year\|month\|journal> [filters]` | Corpus map: entry counts, date span, and text volume per bucket. The cheap first look for a longitudinal question. |
 | `daytwo search <q> [limit] [filters]` | Full-text search (CJK-capable), optionally narrowed by the `list` filters. |
@@ -133,6 +135,15 @@ request by `media-fetch` into a content-addressed, gitignored cache
 (`data/media/<md5>`, override with `DAYONE_MEDIA_DIR`). It is idempotent
 (already-cached files are skipped without a download) and each file is
 md5-verified before it is written, so a wrong decrypt is never cached.
+
+Decrypted local state is owner-only by default: the mirror database and its
+SQLite WAL/SHM sidecars, plus cached media files, are created as `0600`; their
+dedicated directories are `0700`. The process installs a restrictive `077`
+umask before creating them and normal opens tighten legacy group/world bits
+without adding owner permissions. `daytwo doctor` also checks the project-local
+`.env` when present and diagnoses the full cache without printing media
+identifiers; use the explicit `--fix-permissions` option to repair those existing
+paths in one pass.
 
 ## Search
 

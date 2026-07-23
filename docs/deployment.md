@@ -64,14 +64,19 @@ Handling rules (the code cooperates — it only ever reads secrets from env and
 never logs them):
 
 - Keep `.env` with tight permissions on the ingestion host only, or use
-  Docker/compose secrets. Never commit it (it is git-ignored, and gitleaks runs
-  in CI and pre-commit).
+  Docker/compose secrets. Set `chmod 600 .env`; Compose injects this host-side
+  file without mounting it, so a doctor process inside the container cannot
+  inspect its host permissions. Never commit it (it is git-ignored, and gitleaks
+  runs in CI and pre-commit).
 - The **reading** side (the `mcp` service) needs only the mirror, not the
   secrets. Only the `sync` side needs `DAYONE_ENCRYPTION_KEY` and auth — so the
   compose `mcp` service deliberately has **no `env_file`**, keeping the master key
   and password out of a process that merely reads the mirror.
-- Verify config without exposing values: `docker compose run --rm sync doctor`
-  reports secret *presence and shape*, never the values.
+- Verify config and local plaintext permissions without exposing values:
+  `docker compose run --rm sync doctor`. Existing overly broad paths are only
+  changed when you explicitly run
+  `docker compose run --rm sync doctor --fix-permissions`. Doctor reports secret
+  *presence and shape*, never the values.
 
 ## Pin the device id
 

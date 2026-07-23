@@ -27,7 +27,7 @@ COPY package.json bun.lock tsconfig.json ./
 COPY src ./src
 
 # The mirror lives on a writable volume, owned by the non-root `bun` user.
-RUN mkdir -p /data && chown -R bun:bun /data /app
+RUN mkdir -p /data && chown -R bun:bun /data /app && chmod 0700 /data
 USER bun
 VOLUME ["/data"]
 

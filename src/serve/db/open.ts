@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { prepareMirrorStorage } from "../../local-permissions.ts";
 
 const SCHEMA_PATH = fileURLToPath(new URL("./schema.sql", import.meta.url));
 
@@ -15,8 +15,13 @@ export const DEFAULT_MIRROR = process.env.DAYONE_MIRROR ?? "data/mirror.db";
  * Open the mirror and ensure the schema exists. The serving layer opens it
  * read-only by default; the importer passes `writable: true`.
  */
-export function openMirror(path = DEFAULT_MIRROR, opts: { writable?: boolean } = {}): Database {
-  if (opts.writable) mkdirSync(dirname(path), { recursive: true });
+export function openMirror(
+  path = DEFAULT_MIRROR,
+  opts: { writable?: boolean; hardenPermissions?: boolean } = {},
+): Database {
+  if (opts.writable || opts.hardenPermissions !== false) {
+    prepareMirrorStorage(path, { createParent: opts.writable === true });
+  }
   const db = new Database(path, {
     readonly: !opts.writable,
     create: opts.writable === true,
@@ -34,6 +39,12 @@ export function openMirror(path = DEFAULT_MIRROR, opts: { writable?: boolean } =
   }
   if (opts.writable) {
     db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+  }
+  // Opening/initializing SQLite may create the main file and WAL/SHM sidecars.
+  // The private umask protects the creation itself; this also tightens existing
+  // artifacts whose legacy permissions were broader.
+  if (opts.writable || opts.hardenPermissions !== false) {
+    prepareMirrorStorage(path, { createParent: opts.writable === true });
   }
   return db;
 }
