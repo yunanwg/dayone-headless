@@ -6,6 +6,7 @@
 
 import type { Database } from "bun:sqlite";
 import { isMediaCached, MEDIA_DIR, mediaCachePath } from "../media-cache.ts";
+import { readSyncStatus, type SyncStatus } from "../sync-status.ts";
 
 /**
  * A malformed or oversized search query. Thrown by `searchEntries` so callers
@@ -192,6 +193,23 @@ export function getSyncedAt(db: Database): string | null {
   } catch {
     return null; // meta table absent (old mirror)
   }
+}
+
+/** Completeness-aware freshness while retaining the legacy `synced_at` field. */
+export function getFreshness(db: Database): {
+  synced_at: string | null;
+  sync_status: SyncStatus;
+} {
+  const syncStatus = readSyncStatus(db);
+  return {
+    synced_at: syncStatus.last_complete_at,
+    sync_status: syncStatus,
+  };
+}
+
+/** Detailed mirror sync state for dedicated CLI/MCP status commands. */
+export function getSyncStatus(db: Database): SyncStatus {
+  return readSyncStatus(db);
 }
 
 export function listJournals(db: Database): JournalRow[] {

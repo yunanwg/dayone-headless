@@ -8,6 +8,7 @@
  *   daytwo mcp                  run the read-only MCP server (stdio)
  *   daytwo doctor               check config + mirror health
  *   daytwo doctor --fix-permissions  tighten existing local plaintext paths
+ *   daytwo sync-status          show last attempt + last complete sync state
  *   daytwo journals             list journals + counts + freshness
  *   daytwo stats <group_by>     corpus map: counts/text volume by year|month|journal
  *   daytwo search <q> [limit]   full-text search (CJK-capable)
@@ -29,8 +30,9 @@ import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import {
   getEntry,
   getEntryMedia,
+  getFreshness,
   getStats,
-  getSyncedAt,
+  getSyncStatus,
   InvalidSearchQueryError,
   type ListFilters,
   listEntries,
@@ -116,7 +118,8 @@ switch (cmd) {
     const t0 = Date.now();
     const r = await sync(key, { onProgress: (m) => console.error(m) });
     console.error(
-      `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${r.changed} changed, -${r.removed} removed → mirror`,
+      `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${r.changed} changed, -${r.removed} removed, ` +
+        `${r.failed} failed → mirror (${r.status}; last complete ${r.lastCompleteAt ?? "never"})`,
     );
     break;
   }
@@ -154,9 +157,16 @@ switch (cmd) {
     break;
   }
 
+  case "sync-status": {
+    const db = requireMirror();
+    out(getSyncStatus(db));
+    db.close();
+    break;
+  }
+
   case "journals": {
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), journals: listJournals(db) });
+    out({ ...getFreshness(db), journals: listJournals(db) });
     db.close();
     break;
   }
@@ -188,7 +198,7 @@ switch (cmd) {
       process.exit(1);
     }
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), ...getStats(db, groupBy, parseListFilters(rest.slice(1))) });
+    out({ ...getFreshness(db), ...getStats(db, groupBy, parseListFilters(rest.slice(1))) });
     db.close();
     break;
   }
@@ -208,7 +218,7 @@ switch (cmd) {
     Object.assign(filters, parseListFilters(rangeArgs));
     const db = requireMirror();
     try {
-      out({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) });
+      out({ ...getFreshness(db), results: searchEntries(db, query, filters) });
     } catch (err) {
       if (err instanceof InvalidSearchQueryError) {
         console.error(err.message);
@@ -223,14 +233,14 @@ switch (cmd) {
 
   case "list": {
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), results: listEntries(db, parseListFilters(rest)) });
+    out({ ...getFreshness(db), results: listEntries(db, parseListFilters(rest)) });
     db.close();
     break;
   }
 
   case "tags": {
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), tags: listTags(db) });
+    out({ ...getFreshness(db), tags: listTags(db) });
     db.close();
     break;
   }
@@ -242,7 +252,7 @@ switch (cmd) {
       process.exit(1);
     }
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), media: getEntryMedia(db, uuid) });
+    out({ ...getFreshness(db), media: getEntryMedia(db, uuid) });
     db.close();
     break;
   }
@@ -266,14 +276,14 @@ switch (cmd) {
 
   case "on-this-day": {
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), results: onThisDay(db, rest[0] ?? todayMonthDay()) });
+    out({ ...getFreshness(db), results: onThisDay(db, rest[0] ?? todayMonthDay()) });
     db.close();
     break;
   }
 
   default:
     console.error(
-      "commands: sync | media-fetch [uuid] | mcp | doctor | journals | stats <year|month|journal> | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
+      "commands: sync | sync-status | media-fetch [uuid] | mcp | doctor | journals | stats <year|month|journal> | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }
