@@ -10,7 +10,7 @@
 
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decryptAttachment } from "../src/ingest/rest/d1.ts";
@@ -18,6 +18,10 @@ import { type MediaJob, runMediaJobs } from "../src/ingest/rest/media.ts";
 import { isMediaCached, isValidMd5, mediaCachePath, prepareMediaPath } from "../src/media-cache.ts";
 
 const MD5_A = "0123456789abcdef0123456789abcdef";
+
+function mode(path: string): number {
+  return statSync(path).mode & 0o777;
+}
 
 test("mediaCachePath keys by md5 under the given dir", () => {
   expect(mediaCachePath(MD5_A, "/tmp/m")).toBe(`/tmp/m/${MD5_A}`);
@@ -150,6 +154,9 @@ test("runMediaJobs: verifies md5 before caching and skips already-cached files",
   expect(isMediaCached(jobs[1]!.md5!, dir)).toBe(false); // wrong-decrypt never written
   expect(isMediaCached(jobs[2]!.md5!, dir)).toBe(true);
   expect(isMediaCached(jobs[3]!.md5!, dir)).toBe(true);
+  expect(mode(dir)).toBe(0o700);
+  expect(mode(mediaCachePath(jobs[2]!.md5!, dir))).toBe(0o600);
+  expect(mode(mediaCachePath(jobs[3]!.md5!, dir))).toBe(0o600);
 });
 
 test("runMediaJobs: a missing or malformed md5 is skipped up front, never fetched", async () => {

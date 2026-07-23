@@ -5,10 +5,12 @@
 
 import { existsSync } from "node:fs";
 import { parseMasterKey } from "../ingest/rest/crypto.ts";
+import { checkLocalPermissions, formatMode } from "../local-permissions.ts";
+import { MEDIA_DIR } from "../media-cache.ts";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import { getSyncedAt } from "./queries.ts";
 
-export async function doctor(): Promise<number> {
+export async function doctor(opts: { fixPermissions?: boolean } = {}): Promise<number> {
   let ok = true;
   const check = (label: string, good: boolean, detail = "") => {
     console.error(`${good ? "✓" : "✗"} ${label}${detail ? ` — ${detail}` : ""}`);
@@ -53,11 +55,39 @@ export async function doctor(): Promise<number> {
       : "unset — a random device id is generated each run; pin it to stay one device",
   );
 
+  // --- local plaintext permissions ---
+  const permissions = checkLocalPermissions(DEFAULT_MIRROR, MEDIA_DIR, {
+    fix: opts.fixPermissions,
+    // Bun's project-local dotenv convention. Do not infer or chmod arbitrary
+    // env-file paths; Compose injects its host-side env_file without mounting it.
+    envFilePath: ".env",
+  });
+  if (permissions.issues.length === 0) {
+    check(
+      "local plaintext permissions",
+      true,
+      `${permissions.checked} path(s) owner-only${permissions.fixed ? `; fixed ${permissions.fixed}` : ""}`,
+    );
+  } else {
+    const modes = permissions.issues
+      .filter((issue) => issue.actualMode !== undefined)
+      .map((issue) => formatMode(issue.actualMode));
+    check(
+      "local plaintext permissions",
+      false,
+      `${permissions.issues.length} unsafe/unreadable path(s)` +
+        `${modes.length ? ` (mode${modes.length === 1 ? "" : "s"} ${[...new Set(modes)].join(", ")})` : ""}` +
+        `${opts.fixPermissions ? `; fixed ${permissions.fixed}` : "; run `daytwo doctor --fix-permissions`"}`,
+    );
+  }
+
   // --- mirror ---
   if (!existsSync(DEFAULT_MIRROR)) {
     check(`mirror (${DEFAULT_MIRROR})`, false, "not found — run `daytwo sync`");
   } else {
-    const db = openMirror();
+    // Permission diagnosis above must remain non-mutating unless the explicit
+    // repair flag was supplied.
+    const db = openMirror(DEFAULT_MIRROR, { hardenPermissions: opts.fixPermissions === true });
     const entries = (db.query("SELECT COUNT(*) c FROM entry").get() as { c: number }).c;
     const media = (db.query("SELECT COUNT(*) c FROM media").get() as { c: number }).c;
     const synced = getSyncedAt(db);

@@ -9,8 +9,9 @@
  * Gitignored, like the mirror: decrypted personal media never enters git.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { preparePrivateDirectory } from "./local-permissions.ts";
 
 /** Cache root. Defaults under the mirror's `data/` dir; override for tests/homelab. */
 export const MEDIA_DIR = process.env.DAYONE_MEDIA_DIR ?? "data/media";
@@ -48,6 +49,6 @@ export function isMediaCached(md5: string, dir: string = MEDIA_DIR): boolean {
  *  caller writes the bytes (e.g. `Bun.write`) so the I/O stays async. */
 export function prepareMediaPath(md5: string, dir: string = MEDIA_DIR): string {
   const path = mediaCachePath(md5, dir);
-  mkdirSync(dirname(path), { recursive: true });
+  preparePrivateDirectory(dirname(path));
   return path;
 }

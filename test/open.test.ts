@@ -10,13 +10,17 @@
  */
 
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMirror } from "../src/serve/db/open.ts";
 
 function pragma(db: ReturnType<typeof openMirror>, name: string, column = name): unknown {
   return (db.query(`PRAGMA ${name}`).get() as Record<string, unknown> | null)?.[column];
+}
+
+function mode(path: string): number {
+  return statSync(path).mode & 0o777;
 }
 
 test("writable open sets busy_timeout and creates entry_sync_journal_idx", () => {
@@ -51,6 +55,26 @@ test("an existing mirror file gains the new index on its next writable open", ()
     second.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writable open creates private mirror files and sidecars under a private directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "mirror-permissions-"));
+  const dir = join(root, "private-data");
+  const path = join(dir, "mirror.db");
+  try {
+    const db = openMirror(path, { writable: true });
+    db.exec("INSERT INTO meta (key, value) VALUES ('permissions-test', 'synthetic');");
+
+    expect(mode(dir)).toBe(0o700);
+    expect(mode(path)).toBe(0o600);
+    for (const suffix of ["-wal", "-shm"]) {
+      const sidecar = `${path}${suffix}`;
+      if (existsSync(sidecar)) expect(mode(sidecar)).toBe(0o600);
+    }
+    db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

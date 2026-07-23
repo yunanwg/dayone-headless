@@ -16,7 +16,8 @@ To sync + decrypt, the process needs, from the environment:
   used only to mint the short-lived API token.
 
 The **mirror** (`data/mirror.db`) contains your decrypted entry text + metadata,
-and is as sensitive as the journal itself.
+and cached media contains decrypted attachment bytes. Both are as sensitive as
+the journal itself.
 
 ## Rules the code follows
 
@@ -30,6 +31,14 @@ and is as sensitive as the journal itself.
 - **Read-only.** There are no write paths to Day One.
 - **Media bytes are never mirrored** — only metadata; blobs are fetched + decrypted
   on demand.
+- **Decrypted files are owner-only by default.** A restrictive `077` umask
+  protects creation; mirror/SQLite sidecar/media files target `0600` and their
+  dedicated directories target `0700`. Normal opens remove legacy group/world
+  bits without broadening owner permissions. `daytwo doctor` checks the exact
+  project-local `.env` when present and otherwise only diagnoses;
+  `daytwo doctor --fix-permissions` explicitly repairs that file, the complete
+  existing mirror, and the flat media cache. It does not infer or modify other
+  dotenv paths.
 
 ## Server authenticity (integrity vs. authenticity)
 
@@ -52,6 +61,11 @@ conformance oracle. Verifying the envelope signature is a known gap.
   compose `mcp` service has no `env_file` — the encryption key and password stay
   with `sync`, the only process that needs them.
 - The image runs **non-root** and ships **no browser**.
+- The sync and MCP processes that share a mirror must run as the same service
+  UID (the Compose image uses the non-root `bun` user). For bind mounts, make
+  that UID the owner rather than relaxing the mirror to group/world-readable.
+  Filesystems that reject `chmod` remain usable when already accessible, but
+  `doctor` reports the unresolved permission problem.
 - **Do not expose the MCP server directly.** It binds to loopback (`127.0.0.1`) by
   default; front it with an authenticating proxy (e.g. a Cloudflare Access tunnel).
   Anyone who reaches it can read your journal. Behind that proxy, two optional
