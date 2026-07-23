@@ -18,6 +18,31 @@ export interface EntrySummary {
   place_name: string | null;
   starred: number;
   snippet: string | null;
+  /** Only populated by listEntries; search/on_this_day leave it undefined. */
+  tags?: string[];
+}
+
+/**
+ * Structured (non-text) filters for listEntries. Every field is optional and
+ * ANDed together; an empty object lists the most recent entries. Date bounds are
+ * ISO-8601 prefixes compared against creation_date — `from` is an inclusive lower
+ * bound, `to` an inclusive upper bound (a bare `YYYY-MM-DD` covers the whole day).
+ */
+export interface ListFilters {
+  journal?: string;
+  tag?: string;
+  starred?: boolean;
+  from?: string;
+  to?: string;
+  /** Case-insensitive substring over place_name / locality_name / country. */
+  place?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TagFacet {
+  name: string;
+  entries: number;
 }
 
 /** When the mirror was last synced (ISO-8601), or null if unknown/never. */
@@ -59,6 +84,81 @@ export function searchEntries(db: Database, query: string, limit = 25): EntrySum
        LIMIT ?`,
     )
     .all(query, limit) as EntrySummary[];
+}
+
+/**
+ * Structured browse: filter by journal / tag / date range / place / starred and
+ * page through the results, newest first. No text query — this is the complement
+ * to searchEntries, for "the last N entries", "everything tagged code in 2023",
+ * "starred entries from Paris", etc. All filters AND together.
+ */
+export function listEntries(db: Database, filters: ListFilters = {}): EntrySummary[] {
+  const where: string[] = [];
+  const params: Record<string, string | number> = {};
+
+  if (filters.journal !== undefined) {
+    where.push("j.name = $journal");
+    params.$journal = filters.journal;
+  }
+  if (filters.starred !== undefined) {
+    where.push("e.starred = $starred");
+    params.$starred = filters.starred ? 1 : 0;
+  }
+  if (filters.from !== undefined) {
+    where.push("e.creation_date >= $from");
+    params.$from = filters.from;
+  }
+  if (filters.to !== undefined) {
+    // Append '~' (0x7E, above 'T'/'Z') so a bare date upper bound is inclusive
+    // of that whole day, and a full timestamp bound stays inclusive too.
+    where.push("e.creation_date <= $to");
+    params.$to = `${filters.to}~`;
+  }
+  if (filters.place !== undefined) {
+    where.push("(e.place_name LIKE $place OR e.locality_name LIKE $place OR e.country LIKE $place)");
+    params.$place = `%${filters.place}%`;
+  }
+  if (filters.tag !== undefined) {
+    // Correlated existence check keeps the row-per-entry shape (no fan-out).
+    where.push(
+      "EXISTS (SELECT 1 FROM entry_tag et JOIN tag t ON t.id = et.tag_id " +
+        "WHERE et.entry_uuid = e.uuid AND t.name = $tag)",
+    );
+    params.$tag = filters.tag;
+  }
+
+  params.$limit = filters.limit ?? 50;
+  params.$offset = filters.offset ?? 0;
+
+  const rows = db
+    .query(
+      `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
+              substr(e.text, 1, 140) AS snippet,
+              (SELECT group_concat(t.name, char(10) ORDER BY t.name)
+               FROM entry_tag et JOIN tag t ON t.id = et.tag_id
+               WHERE et.entry_uuid = e.uuid) AS tag_list
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       ORDER BY e.creation_date DESC, e.uuid
+       LIMIT $limit OFFSET $offset`,
+    )
+    .all(params) as (Omit<EntrySummary, "tags"> & { tag_list: string | null })[];
+
+  return rows.map(({ tag_list, ...e }) => ({
+    ...e,
+    tags: tag_list ? tag_list.split("\n") : [],
+  }));
+}
+
+/** All tags with how many entries carry each, most-used first. */
+export function listTags(db: Database): TagFacet[] {
+  return db
+    .query(
+      `SELECT t.name, COUNT(et.entry_uuid) AS entries
+       FROM tag t LEFT JOIN entry_tag et ON et.tag_id = t.id
+       GROUP BY t.id ORDER BY entries DESC, t.name`,
+    )
+    .all() as TagFacet[];
 }
 
 /**

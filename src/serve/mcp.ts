@@ -16,7 +16,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
-import { getEntry, getSyncedAt, listJournals, onThisDay, searchEntries } from "./queries.ts";
+import {
+  getEntry,
+  getSyncedAt,
+  listEntries,
+  listJournals,
+  listTags,
+  onThisDay,
+  searchEntries,
+} from "./queries.ts";
 
 // Wait for the mirror to exist (a sibling `sync` may still be doing the first
 // sync). Poll up to DAYONE_MIRROR_WAIT seconds (default 300), then give up.
@@ -45,9 +53,10 @@ function buildServer(): McpServer {
     { name: "dayone-headless", version: "0.1.0" },
     {
       instructions:
-        "Read-only access to a personal Day One journal mirror. Use search_entries or " +
-        "on_this_day to find entries, then get_entry for full content. `synced_at` on each " +
-        "result says how fresh the mirror is. This is READ-ONLY — you cannot create or edit entries.",
+        "Read-only access to a personal Day One journal mirror. Find entries with search_entries " +
+        "(keyword/phrase) or list_entries (filter by journal/tag/date/place/starred), browse the " +
+        "facets with list_journals / list_tags, then get_entry for full content. `synced_at` on " +
+        "each result says how fresh the mirror is. This is READ-ONLY — you cannot create or edit entries.",
     },
   );
 
@@ -75,6 +84,40 @@ function buildServer(): McpServer {
     },
     async ({ query, limit }) =>
       json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, limit) }),
+  );
+
+  server.registerTool(
+    "list_entries",
+    {
+      description:
+        "Structured browse (no text query) — filter entries by journal, tag, date range, " +
+        "place, or starred, newest first, with pagination. Use this for 'my last N entries', " +
+        "'everything tagged X in 2023', 'starred entries from Paris'. For keyword/phrase " +
+        "matching use search_entries instead. All filters AND together. Call get_entry for full content.",
+      inputSchema: {
+        journal: z.string().optional().describe("exact journal name (see list_journals)"),
+        tag: z.string().optional().describe("exact tag name (see list_tags)"),
+        starred: z.boolean().optional().describe("only starred entries when true"),
+        from: z.string().optional().describe("inclusive lower bound on date, ISO-8601 (e.g. 2023-01-01)"),
+        to: z.string().optional().describe("inclusive upper bound; a bare YYYY-MM-DD covers the whole day"),
+        place: z.string().optional().describe("case-insensitive substring of place / locality / country"),
+        limit: z.number().int().min(1).max(200).default(50).describe("max results (default 50)"),
+        offset: z.number().int().min(0).default(0).describe("skip N results, for paging (default 0)"),
+      },
+      annotations: READ_ONLY,
+    },
+    async (filters) => json({ synced_at: getSyncedAt(db), results: listEntries(db, filters) }),
+  );
+
+  server.registerTool(
+    "list_tags",
+    {
+      description:
+        "List all tags with how many entries carry each, most-used first. Feed a name to list_entries.",
+      inputSchema: {},
+      annotations: READ_ONLY,
+    },
+    async () => json({ synced_at: getSyncedAt(db), tags: listTags(db) }),
   );
 
   server.registerTool(
