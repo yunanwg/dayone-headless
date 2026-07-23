@@ -47,7 +47,7 @@ async function launch(profileDir: string): Promise<BrowserContext> {
 /**
  * Force a journal's entries to sync into IndexedDB by opening its route. Recon
  * confirmed: navigating to `/journals/<id>` triggers the download of a
- * not-yet-synced journal (the lazy `J4` filled 0→52 this way). The
+ * not-yet-synced journal (a lazy journal filled after navigation). The
  * completeness gate then polls until its entries actually land.
  */
 const base = APP_URL.replace(/\/$/, "");

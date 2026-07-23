@@ -25,15 +25,19 @@ it as a clean CLI and MCP server over a local, decrypted **mirror**.
 
 ## Features
 
-- **Read-only MCP server** — `list_journals`, `search_entries`, `get_entry`,
-  `on_this_day`. Every result carries `synced_at` so an agent knows how fresh the
-  data is.
+- **Read-only MCP server** — `get_stats`, `list_journals`, `list_tags`,
+  `search_entries`, `list_entries`, `get_entry`, `get_entries`, `on_this_day`,
+  plus media tools. Analysis-grade: `get_stats` maps a decade without reading a
+  word; batch/full-text reads let an agent pull a whole thread at once. Every
+  result carries `synced_at` so an agent knows how fresh the data is.
 - **CLI** — the same reads plus `sync` and a `doctor` health check.
 - **No Mac, no browser in production** — the shipping ingester is pure HTTPS +
   our own crypto. The Docker image contains no Chromium.
 - **Incremental sync** — first sync is full; after that only entries whose server
   revision changed are re-fetched and re-decrypted.
-- **Full-text search** over entry bodies (SQLite FTS5).
+- **Full-text search** over entry bodies (SQLite FTS5), with a CJK-capable
+  substring fallback so Chinese/Japanese/Korean queries recall correctly (FTS5's
+  `unicode61` tokenizer does not segment CJK words — see *Search* below).
 - **Portable, decoupled mirror** — a local SQLite DB shaped like Day One's JSON
   export. It is also your portable backup, and nothing it can't yet model is lost
   (every row keeps the verbatim source in a `raw` column).
@@ -94,10 +98,11 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo mcp` | Run the read-only MCP server. stdio by default; streamable-HTTP if `DAYONE_MCP_PORT` is set. |
 | `daytwo doctor` | Config + mirror health self-check (reports secret *presence/shape*, never values). |
 | `daytwo journals` | List journals with entry counts and freshness. |
-| `daytwo search <q> [limit] [filters]` | Full-text search, optionally narrowed by the `list` filters. |
-| `daytwo list [filters]` | Structured browse — filter/paginate without a text query. |
+| `daytwo stats <year\|month\|journal> [filters]` | Corpus map: entry counts, date span, and text volume per bucket. The cheap first look for a longitudinal question. |
+| `daytwo search <q> [limit] [filters]` | Full-text search (CJK-capable), optionally narrowed by the `list` filters. |
+| `daytwo list [filters]` | Structured browse — filter/paginate without a text query. `--include-text` returns full bodies; `--order-by date\|length\|editing_time`. |
 | `daytwo tags` | All tags with entry counts, most-used first. |
-| `daytwo get <uuid>` | One entry's full content + metadata. |
+| `daytwo get <uuid> [--rich-text] [--raw]` | One entry, curated. `--rich-text` / `--raw` add the heavy fields. |
 | `daytwo media <uuid>` | Media metadata attached to an entry (never bytes). |
 | `daytwo media-file <id>` | Resolve a media identifier to its cached bytes path (after `media-fetch`). |
 | `daytwo on-this-day [MM-DD]` | Entries for a month-day across years (defaults to today). |
@@ -128,6 +133,26 @@ request by `media-fetch` into a content-addressed, gitignored cache
 (`data/media/<md5>`, override with `DAYONE_MEDIA_DIR`). It is idempotent
 (already-cached files are skipped without a download) and each file is
 md5-verified before it is written, so a wrong decrypt is never cached.
+
+## Search
+
+`search_entries` is a hybrid over one query string:
+
+- **Latin queries** go through **SQLite FTS5** — relevance ranking, `snippet()`
+  highlighting, phrase/`AND`/`OR`/`NOT`/prefix operators.
+- **CJK queries** (any term containing a Chinese / Japanese / Korean codepoint)
+  fall back to a **`LIKE` substring** scan: every whitespace-split term must
+  appear in the body (`AND`-combined), newest first, with a hand-built snippet.
+
+Why the split, stated honestly: FTS5's `unicode61` tokenizer does not segment
+CJK — it treats a run of ideographs as one token — so `MATCH '咖啡'` matches only
+entries where that exact 2-char run is a whole "word", missing almost everything.
+The trigram tokenizer is not a fix either: the dominant Chinese search terms are
+2-character words, below trigram's 3-character minimum. Substring match is the
+only correct recall path for short CJK terms, and at this corpus size a `LIKE`
+scan is milliseconds. The trade-off is that CJK results are ordered by date, not
+relevance, and boolean/phrase operators apply to Latin queries only. Structured
+filters (journal / tag / date / place / starred) work identically on both paths.
 
 ## MCP usage
 
@@ -164,13 +189,24 @@ whatever runs `sync`.)
 
 Tools exposed (all read-only):
 
+- `get_stats` — the corpus map: entry counts, date span, and text volume grouped
+  by year / month / journal (same filters as `list_entries`). The cheap first
+  call for any longitudinal or overview question — no entry text is read.
 - `list_journals` — journals + entry counts + `synced_at`.
 - `list_tags` — every tag with its entry count, most-used first.
-- `search_entries` — FTS5 query over bodies, optionally narrowed by the same
-  filters as `list_entries`; returns uuid, date, place, snippet.
+- `search_entries` — keyword search over bodies (CJK-capable; see *Search*),
+  optionally narrowed by the same filters as `list_entries`; each hit returns
+  uuid, date, place, journal, tags, `text_length`, and a snippet.
 - `list_entries` — structured browse: filter by journal / tag / date range /
-  place / starred, newest first, paginated. The complement to `search_entries`.
-- `get_entry` — full entry by uuid (media listed as metadata).
+  place / starred, paginated. `include_text` returns full bodies for bulk
+  reading; `order_by` = `date` | `length` | `editing_time`. The complement to
+  `search_entries`.
+- `get_entry` — one entry as a curated, token-lean object (typed fields + inlined
+  media metadata + `text_length`); `include_rich_text` / `include_raw` opt back
+  into the heavy fields.
+- `get_entries` — batch curated read of up to 50 uuids in one call, in order,
+  with optional per-entry `max_chars` truncation; unknown uuids returned in
+  `missing`.
 - `get_entry_media` — media attached to an entry, as metadata only (never bytes).
 - `get_media` — the decrypted **bytes** of one attachment by identifier (photos
   inline as an image; larger/other files as a local path). Serves from the cache

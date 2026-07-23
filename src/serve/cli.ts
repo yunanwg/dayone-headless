@@ -8,17 +8,19 @@
  *   daytwo mcp                  run the read-only MCP server (stdio)
  *   daytwo doctor               check config + mirror health
  *   daytwo journals             list journals + counts + freshness
- *   daytwo search <q> [limit]   full-text search
+ *   daytwo stats <group_by>     corpus map: counts/text volume by year|month|journal
+ *   daytwo search <q> [limit]   full-text search (CJK-capable)
  *   daytwo list [filters]       structured browse (see flags below)
  *   daytwo tags                 all tags with entry counts
- *   daytwo get <uuid>           one entry
+ *   daytwo get <uuid>           one entry (curated; --rich-text / --raw to add heavy fields)
  *   daytwo media <uuid>         media metadata attached to an entry
  *   daytwo media-file <id>      resolve a media identifier to its cached bytes path
  *   daytwo on-this-day [MM-DD]  entries for a month-day across years
  *
- * `list` filters (all optional, ANDed):
+ * `list` (and `search` / `stats`) filters (all optional, ANDed):
  *   --journal <name> --tag <name> --starred --from <ISO> --to <ISO>
  *   --place <substr> --limit <n> --offset <n>
+ *   --include-text (list only)  --order-by date|length|editing_time (list only)
  */
 
 import { existsSync } from "node:fs";
@@ -26,6 +28,7 @@ import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import {
   getEntry,
   getEntryMedia,
+  getStats,
   getSyncedAt,
   InvalidSearchQueryError,
   type ListFilters,
@@ -82,6 +85,18 @@ function parseListFilters(argv: string[]): ListFilters {
       case "--offset":
         f.offset = Number(argv[++i]);
         break;
+      case "--include-text":
+        f.include_text = true;
+        break;
+      case "--order-by": {
+        const v = argv[++i];
+        if (v !== "date" && v !== "length" && v !== "editing_time") {
+          console.error("--order-by must be one of: date | length | editing_time");
+          process.exit(1);
+        }
+        f.order_by = v;
+        break;
+      }
       default:
         console.error(`unknown flag for list: ${a}`);
         process.exit(1);
@@ -143,17 +158,32 @@ switch (cmd) {
   case "get": {
     const uuid = rest[0];
     if (!uuid) {
-      console.error("usage: daytwo get <uuid>");
+      console.error("usage: daytwo get <uuid> [--rich-text] [--raw]");
       process.exit(1);
     }
     const db = requireMirror();
-    const entry = getEntry(db, uuid);
+    const entry = getEntry(db, uuid, {
+      includeRichText: rest.includes("--rich-text"),
+      includeRaw: rest.includes("--raw"),
+    });
     db.close();
     if (!entry) {
       console.error(`no entry: ${uuid}`);
       process.exit(2);
     }
     out(entry);
+    break;
+  }
+
+  case "stats": {
+    const groupBy = rest[0];
+    if (groupBy !== "year" && groupBy !== "month" && groupBy !== "journal") {
+      console.error("usage: daytwo stats <year|month|journal> [filters]");
+      process.exit(1);
+    }
+    const db = requireMirror();
+    out({ synced_at: getSyncedAt(db), ...getStats(db, groupBy, parseListFilters(rest.slice(1))) });
+    db.close();
     break;
   }
 
@@ -237,7 +267,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | media-fetch [uuid] | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
+      "commands: sync | media-fetch [uuid] | mcp | doctor | journals | stats <year|month|journal> | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }

@@ -8,13 +8,17 @@ import { readFileSync } from "node:fs";
 import { importExport } from "../src/ingest/json-export/import.ts";
 import { openMirror } from "../src/serve/db/open.ts";
 import {
+  getEntries,
   getEntry,
   getEntryMedia,
+  getStats,
   InvalidSearchQueryError,
   listEntries,
   listJournals,
   listTags,
   onThisDay,
+  SEARCH_QUERY_MAX_CHARS,
+  SEARCH_QUERY_MAX_TERMS,
   searchEntries,
 } from "../src/serve/queries.ts";
 import type { DayOneExport } from "../src/types.ts";
@@ -207,6 +211,215 @@ test("searchEntries surfaces a malformed FTS5 query as a typed error", () => {
   expect(() => searchEntries(db, '"unbalanced')).toThrow(/FTS5 syntax/);
   // A well-formed query still returns normally (no false positives).
   expect(() => searchEntries(db, "Paris")).not.toThrow();
+});
+
+test("searchEntries rejects oversized queries before SQLite with a typed error", () => {
+  const tooLong = "a".repeat(SEARCH_QUERY_MAX_CHARS + 1);
+  expect(() => searchEntries(db, tooLong)).toThrow(InvalidSearchQueryError);
+  expect(() => searchEntries(db, tooLong)).toThrow(`maximum length is ${SEARCH_QUERY_MAX_CHARS} characters`);
+
+  const atLimit = Array.from({ length: SEARCH_QUERY_MAX_TERMS }, (_, i) => `词${i}`).join(" ");
+  const tooManyTerms = `${atLimit} 词extra`;
+  expect(() => searchEntries(db, atLimit)).not.toThrow();
+  expect(() => searchEntries(db, tooManyTerms)).toThrow(InvalidSearchQueryError);
+  expect(() => searchEntries(db, tooManyTerms)).toThrow(
+    `maximum ${SEARCH_QUERY_MAX_TERMS} whitespace-separated terms`,
+  );
+});
+
+test("search/list/on_this_day summaries carry text_length; search carries journal + tags", () => {
+  // text_length is present on every summary surface (item 3c).
+  expect(listEntries(db, { limit: 1 })[0]!.text_length).toBeGreaterThan(0);
+  expect(onThisDay(db, "07-22")[0]!.text_length).toBeGreaterThan(0);
+  const hit = searchEntries(db, "Paris")[0]!;
+  expect(hit.text_length).toBeGreaterThan(0);
+  // search hits carry journal + tags on the FTS path (item 5).
+  expect(hit.journal).toBe("sample");
+  expect(hit.tags).toEqual(["paris", "travel"]);
+});
+
+test("listEntries include_text returns full body; order_by=length sorts by LENGTH(text)", () => {
+  const withText = listEntries(db, { include_text: true, limit: 1 });
+  expect(withText[0]!.text).toBe("New year, homelab plans: headless journal reader.");
+  expect(withText[0]!.snippet).toBeUndefined();
+  // Longest body first regardless of date.
+  const byLen = listEntries(db, { order_by: "length" });
+  for (let i = 1; i < byLen.length; i++) {
+    expect(byLen[i - 1]!.text_length!).toBeGreaterThanOrEqual(byLen[i]!.text_length!);
+  }
+});
+
+test("getEntry returns a curated shape with typed columns + inlined media", () => {
+  const e = getEntry(db, "AAAA1111BBBB2222CCCC3333DDDD4444")!;
+  expect(e.journal).toBe("sample");
+  expect(e.starred).toBe(true);
+  expect(e.tags).toEqual(["paris", "travel"]);
+  expect(e.location).toEqual({
+    place_name: "Rive Gauche",
+    locality_name: "Paris",
+    country: "France",
+    latitude: 48.8566,
+    longitude: 2.3522,
+  });
+  expect(e.weather).toEqual({ code: "clear", temperature_c: 22.5 });
+  expect(e.media).toHaveLength(1);
+  expect(e.media[0]!.identifier).toBe("PHOTO-ID-1");
+  expect(e.text_length).toBe(e.text!.length);
+  // Heavy fields are opt-in.
+  expect(e.rich_text).toBeUndefined();
+  expect(e.raw).toBeUndefined();
+  // Entry with no location/weather → nulls, not empty objects.
+  const bare = getEntry(db, "EEEE5555FFFF6666GGGG7777HHHH8888")!;
+  expect(bare.location).toBeNull();
+  expect(bare.weather).toBeNull();
+  expect(getEntry(db, "does-not-exist")).toBeNull();
+});
+
+test("getEntry include_raw / include_rich_text opt back into heavy fields", () => {
+  const e = getEntry(db, "AAAA1111BBBB2222CCCC3333DDDD4444", { includeRaw: true })!;
+  expect((e.raw as { uuid: string }).uuid).toBe("AAAA1111BBBB2222CCCC3333DDDD4444");
+});
+
+test("getEntries batches in order, truncates text, reports missing", () => {
+  const { entries, missing } = getEntries(
+    db,
+    ["IIII9999JJJJ0000KKKK1111LLLL2222", "nope", "AAAA1111BBBB2222CCCC3333DDDD4444"],
+    { maxChars: 10 },
+  );
+  // Requested order preserved, unknown uuid skipped (not thrown).
+  expect(entries.map((e) => e.uuid)).toEqual([
+    "IIII9999JJJJ0000KKKK1111LLLL2222",
+    "AAAA1111BBBB2222CCCC3333DDDD4444",
+  ]);
+  expect(missing).toEqual(["nope"]);
+  // Body truncated with a note; text_length still reflects the full length.
+  expect(entries[0]!.text).toContain("…[truncated");
+  expect(entries[0]!.text_length).toBeGreaterThan(10);
+});
+
+test("getEntries truncates by Unicode code points without splitting surrogate pairs", () => {
+  const unicodeDb = openMirror(":memory:", { writable: true });
+  importExport(
+    unicodeDb,
+    {
+      metadata: { version: "1.0" },
+      entries: [
+        {
+          uuid: "UNICODE000000000000000000000001",
+          creationDate: "2024-01-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "a😀b",
+        },
+      ],
+    } as unknown as DayOneExport,
+    "unicode",
+  );
+
+  const { entries } = getEntries(unicodeDb, ["UNICODE000000000000000000000001"], {
+    maxChars: 2,
+  });
+  expect(entries[0]!.text).toBe("a😀…[truncated 1 more chars]");
+  expect(entries[0]!.text_length).toBe(3);
+  unicodeDb.close();
+});
+
+test("getStats maps the corpus by year and by journal", () => {
+  const byYear = getStats(db, "year");
+  expect(byYear.overall.entries).toBe(4);
+  expect(byYear.overall.first_date).toBe("2019-07-22T20:15:00Z");
+  expect(byYear.overall.last_date).toBe("2023-01-03T12:00:00Z");
+  expect(byYear.overall.total_text_chars).toBeGreaterThan(0);
+  expect(byYear.buckets.map((b) => b.key)).toEqual(["2019", "2021", "2022", "2023"]);
+  const y2021 = byYear.buckets.find((b) => b.key === "2021")!;
+  expect(y2021.entries).toBe(1);
+  expect(y2021.starred).toBe(1);
+  // Grouping by journal, with a filter applied.
+  const byJournal = getStats(db, "journal", { starred: true });
+  expect(byJournal.overall.entries).toBe(1);
+  expect(byJournal.buckets).toEqual([
+    { key: "sample", entries: 1, text_chars: expect.any(Number), starred: 1 },
+  ]);
+});
+
+test("CJK search: 2-char term recall, mixed queries, filters, FTS path intact", () => {
+  const cdb = openMirror(":memory:", { writable: true });
+  const cjk = {
+    metadata: { version: "1.0" },
+    entries: [
+      {
+        uuid: "CJK000000000000000000000000COFF1",
+        creationDate: "2022-01-01T00:00:00Z",
+        timeZone: "UTC",
+        text: "今天喝了一杯咖啡，很香。coffee time.",
+        tags: ["drink"],
+      },
+      {
+        uuid: "CJK000000000000000000000000COFF2",
+        creationDate: "2023-01-01T00:00:00Z",
+        timeZone: "UTC",
+        text: "和朋友一起喝咖啡聊天。",
+      },
+      {
+        uuid: "CJK000000000000000000000000PLN01",
+        creationDate: "2021-01-01T00:00:00Z",
+        timeZone: "UTC",
+        text: "A plain english entry about tea, no coffee.",
+      },
+    ],
+  } as unknown as DayOneExport;
+  importExport(cdb, cjk, "cjk");
+
+  // 2-char CJK term recalls both matching entries (FTS MATCH would return 0),
+  // newest first, with a bracketed hand-built snippet.
+  const coffee = searchEntries(cdb, "咖啡");
+  expect(coffee.map((e) => e.uuid)).toEqual([
+    "CJK000000000000000000000000COFF2",
+    "CJK000000000000000000000000COFF1",
+  ]);
+  expect(coffee[0]!.snippet).toContain("[咖啡]");
+  expect(coffee[0]!.journal).toBe("cjk");
+
+  // Mixed CJK + latin: every term must match (AND) → only the entry with both.
+  expect(searchEntries(cdb, "咖啡 coffee").map((e) => e.uuid)).toEqual(["CJK000000000000000000000000COFF1"]);
+  // 2-char term that hits one entry only.
+  expect(searchEntries(cdb, "朋友").map((e) => e.uuid)).toEqual(["CJK000000000000000000000000COFF2"]);
+
+  // Structured filters apply identically on the CJK path.
+  expect(searchEntries(cdb, "咖啡", { tag: "drink" }).map((e) => e.uuid)).toEqual([
+    "CJK000000000000000000000000COFF1",
+  ]);
+  expect(searchEntries(cdb, "咖啡", { from: "2023-01-01" }).map((e) => e.uuid)).toEqual([
+    "CJK000000000000000000000000COFF2",
+  ]);
+
+  // Pure-latin query still routes through FTS5 (relevance ranking, snippet()).
+  const latin = searchEntries(cdb, "coffee");
+  expect(latin.length).toBeGreaterThan(0);
+  expect(latin.every((e) => typeof e.snippet === "string")).toBe(true);
+  cdb.close();
+});
+
+test("CJK snippets preserve source offsets when Unicode case folding changes length", () => {
+  const unicodeDb = openMirror(":memory:", { writable: true });
+  importExport(
+    unicodeDb,
+    {
+      metadata: { version: "1.0" },
+      entries: [
+        {
+          uuid: "CJKUNICODEOFFSET000000000000001",
+          creationDate: "2024-01-01T00:00:00Z",
+          timeZone: "UTC",
+          text: "İ咖啡",
+        },
+      ],
+    } as unknown as DayOneExport,
+    "unicode",
+  );
+
+  const hit = searchEntries(unicodeDb, "咖啡")[0]!;
+  expect(hit.snippet).toBe("İ[咖啡]");
+  unicodeDb.close();
 });
 
 test("place filter escapes LIKE wildcards, matching them literally", () => {

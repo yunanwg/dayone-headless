@@ -8,10 +8,9 @@ import type { Database } from "bun:sqlite";
 import { isMediaCached, MEDIA_DIR, mediaCachePath } from "../media-cache.ts";
 
 /**
- * A malformed full-text query (unbalanced quote, dangling operator, unknown column
- * filter, …). Thrown by `searchEntries` so callers can surface a clean "invalid
- * search query" instead of leaking a raw SQLite error. Other DB errors are never
- * mapped to this — only genuine FTS5 query-syntax failures.
+ * A malformed or oversized search query. Thrown by `searchEntries` so callers
+ * can surface a clean "invalid search query" instead of leaking a raw SQLite
+ * error. Other DB errors are never mapped to this.
  */
 export class InvalidSearchQueryError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -66,9 +65,94 @@ export interface EntrySummary {
   creation_date: string;
   place_name: string | null;
   starred: number;
-  snippet: string | null;
-  /** Only populated by listEntries; search/on_this_day leave it undefined. */
+  /** Contextual excerpt; absent when `text` (full body) is returned instead. */
+  snippet?: string | null;
+  /** Full entry body — only when listEntries is called with include_text. */
+  text?: string;
+  /** LENGTH(text) so an agent can spot long reflective entries cheaply. */
+  text_length?: number;
+  /** Owning journal name (search + list). */
+  journal?: string;
+  /** Tags carried by the entry (search + list). */
   tags?: string[];
+}
+
+/**
+ * Codepoints where FTS5 `unicode61` gives no useful word segmentation: CJK
+ * ideographs (+ ext. A / compatibility / ext. B–F via surrogates), kana, and
+ * Hangul. A query term containing any of these routes through the LIKE-substring
+ * path instead of FTS5 — the dominant Chinese search terms are 2-char words,
+ * below the trigram tokenizer's 3-char minimum, so substring match is the only
+ * correct recall path. At ~10k entries a LIKE scan is milliseconds.
+ */
+const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]|[\u{20000}-\u{3ffff}]/u;
+
+const hasCjk = (s: string): boolean => CJK_RE.test(s);
+
+/** Match SQLite LIKE's default ASCII-only case folding without changing offsets. */
+const foldAsciiCase = (s: string): string => s.replace(/[A-Z]/g, (char) => char.toLowerCase());
+
+/** Bound query work before it reaches FTS5 or the dynamic CJK LIKE expression. */
+export const SEARCH_QUERY_MAX_CHARS = 1024;
+export const SEARCH_QUERY_MAX_TERMS = 32;
+
+function validatedSearchTerms(query: string): string[] {
+  if (query.length > SEARCH_QUERY_MAX_CHARS) {
+    throw new InvalidSearchQueryError(
+      `invalid search query — maximum length is ${SEARCH_QUERY_MAX_CHARS} characters`,
+    );
+  }
+  const terms = query.split(/\s+/).filter(Boolean);
+  if (terms.length > SEARCH_QUERY_MAX_TERMS) {
+    throw new InvalidSearchQueryError(
+      `invalid search query — maximum ${SEARCH_QUERY_MAX_TERMS} whitespace-separated terms`,
+    );
+  }
+  return terms;
+}
+
+/** Escape LIKE wildcards (%, _) and the escape char so a term matches literally. */
+const escapeLike = (s: string): string => s.replace(/[\\%_]/g, "\\$&");
+
+/**
+ * Correlated tag list for a row of `entry e` — newline-joined, name-sorted, no
+ * fan-out. Mirrors the trick used across the entry summaries.
+ */
+const TAG_LIST_SUBQUERY =
+  "(SELECT group_concat(t.name, char(10) ORDER BY t.name) " +
+  "FROM entry_tag et JOIN tag t ON t.id = et.tag_id " +
+  "WHERE et.entry_uuid = e.uuid) AS tag_list";
+
+/** Split a group_concat(char(10)) tag list into an array ([] when null). */
+const splitTags = (list: string | null): string[] => (list ? list.split("\n") : []);
+
+/**
+ * Build a hand-rolled snippet (~60 chars) around the first term match, bracketing
+ * the matched substring `[like this]` to mirror the FTS snippet style. Used by the
+ * CJK LIKE path, which has no FTS `snippet()` to lean on.
+ */
+function buildSnippet(text: string, terms: string[]): string {
+  const CONTEXT = 24; // chars of context on each side of the match
+  const hay = foldAsciiCase(text);
+  let at = -1;
+  let matched = "";
+  for (const t of terms) {
+    const idx = hay.indexOf(foldAsciiCase(t));
+    if (idx !== -1 && (at === -1 || idx < at)) {
+      at = idx;
+      matched = text.slice(idx, idx + t.length);
+    }
+  }
+  if (at === -1) return text.slice(0, 60);
+  const start = Math.max(0, at - CONTEXT);
+  const end = Math.min(text.length, at + matched.length + CONTEXT);
+  return (
+    (start > 0 ? "… " : "") +
+    text.slice(start, at) +
+    `[${matched}]` +
+    text.slice(at + matched.length, end) +
+    (end < text.length ? " …" : "")
+  );
 }
 
 /**
@@ -87,6 +171,10 @@ export interface ListFilters {
   place?: string;
   limit?: number;
   offset?: number;
+  /** Return each entry's full `text` instead of a 140-char snippet (listEntries only). */
+  include_text?: boolean;
+  /** Sort key, all DESC. "date" (default) | "length" (LENGTH(text)) | "editing_time". */
+  order_by?: "date" | "length" | "editing_time";
 }
 
 export interface TagFacet {
@@ -116,9 +204,245 @@ export function listJournals(db: Database): JournalRow[] {
     .all() as JournalRow[];
 }
 
-export function getEntry(db: Database, uuid: string): Record<string, unknown> | null {
-  const row = db.query(`SELECT raw FROM entry WHERE uuid = ?`).get(uuid) as { raw: string } | null;
-  return row ? (JSON.parse(row.raw) as Record<string, unknown>) : null;
+/** Curated single-entry shape: typed columns + selective raw fields, no bloat. */
+export interface CuratedEntry {
+  uuid: string;
+  journal: string;
+  creation_date: string;
+  modified_date: string | null;
+  time_zone: string | null;
+  text: string | null;
+  tags: string[];
+  starred: boolean;
+  pinned: boolean;
+  is_all_day: boolean;
+  editing_time: number | null;
+  location: {
+    place_name: string | null;
+    locality_name: string | null;
+    country: string | null;
+    latitude: number | null;
+    longitude: number | null;
+  } | null;
+  weather: { code: string | null; temperature_c: number | null } | null;
+  media: MediaMeta[];
+  text_length: number;
+  /** Present only with includeRichText. */
+  rich_text?: unknown;
+  /** Present only with includeRaw. */
+  raw?: unknown;
+}
+
+interface EntryColumnsRow {
+  uuid: string;
+  journal: string;
+  creation_date: string;
+  modified_date: string | null;
+  time_zone: string | null;
+  text: string | null;
+  rich_text: string | null;
+  starred: number;
+  pinned: number;
+  is_all_day: number;
+  editing_time: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  place_name: string | null;
+  locality_name: string | null;
+  country: string | null;
+  weather_code: string | null;
+  temperature_c: number | null;
+  text_length: number | null;
+  raw: string;
+}
+
+/** Parse a stored JSON string, falling back to the raw string if it is malformed. */
+function parseJsonOr(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+export interface GetEntryOptions {
+  /** Include the structured rich-text JSON (default false — it duplicates `text`). */
+  includeRichText?: boolean;
+  /** Include the potentially large verbatim raw source object (default false). */
+  includeRaw?: boolean;
+}
+
+/**
+ * One entry as a curated, token-lean object built from typed columns plus a few
+ * selective raw fields — NOT the whole `raw` blob (that duplicates the body via
+ * richText and can contain substantial device/weather/unmodeled metadata).
+ * `includeRichText` / `includeRaw` opt back into the heavy fields when needed.
+ * Returns null for an unknown uuid.
+ */
+export function getEntry(db: Database, uuid: string, opts: GetEntryOptions = {}): CuratedEntry | null {
+  const row = db
+    .query(
+      `SELECT e.uuid, j.name AS journal, e.creation_date, e.modified_date, e.time_zone,
+              e.text, e.rich_text, e.starred, e.pinned, e.is_all_day, e.editing_time,
+              e.latitude, e.longitude, e.place_name, e.locality_name, e.country,
+              e.weather_code, e.temperature_c, LENGTH(e.text) AS text_length, e.raw
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       WHERE e.uuid = ?`,
+    )
+    .get(uuid) as EntryColumnsRow | null;
+  if (!row) return null;
+
+  const hasLocation =
+    row.place_name !== null ||
+    row.locality_name !== null ||
+    row.country !== null ||
+    row.latitude !== null ||
+    row.longitude !== null;
+  const hasWeather = row.weather_code !== null || row.temperature_c !== null;
+
+  const entry: CuratedEntry = {
+    uuid: row.uuid,
+    journal: row.journal,
+    creation_date: row.creation_date,
+    modified_date: row.modified_date,
+    time_zone: row.time_zone,
+    text: row.text,
+    tags: db
+      .query(
+        `SELECT t.name FROM entry_tag et JOIN tag t ON t.id = et.tag_id
+         WHERE et.entry_uuid = ? ORDER BY t.name`,
+      )
+      .all(uuid)
+      .map((r) => (r as { name: string }).name),
+    starred: !!row.starred,
+    pinned: !!row.pinned,
+    is_all_day: !!row.is_all_day,
+    editing_time: row.editing_time,
+    location: hasLocation
+      ? {
+          place_name: row.place_name,
+          locality_name: row.locality_name,
+          country: row.country,
+          latitude: row.latitude,
+          longitude: row.longitude,
+        }
+      : null,
+    weather: hasWeather ? { code: row.weather_code, temperature_c: row.temperature_c } : null,
+    media: getEntryMedia(db, uuid),
+    text_length: row.text_length ?? 0,
+  };
+  if (opts.includeRichText) entry.rich_text = row.rich_text ? parseJsonOr(row.rich_text) : null;
+  if (opts.includeRaw) entry.raw = parseJsonOr(row.raw);
+  return entry;
+}
+
+export interface GetEntriesOptions extends GetEntryOptions {
+  /** Truncate each entry's text to this many chars, appending a truncation note. */
+  maxChars?: number;
+}
+
+export interface GetEntriesResult {
+  entries: CuratedEntry[];
+  /** uuids that matched no entry — reported, never thrown. */
+  missing: string[];
+}
+
+/** Cap on how many uuids one getEntries call may request. */
+export const GET_ENTRIES_MAX = 50;
+
+/** Slice by Unicode code points so a non-BMP character is never split mid-surrogate. */
+function sliceCodePoints(value: string, maxCodePoints: number): string {
+  let end = 0;
+  let count = 0;
+  for (const codePoint of value) {
+    if (count >= maxCodePoints) break;
+    end += codePoint.length;
+    count++;
+  }
+  return value.slice(0, end);
+}
+
+/**
+ * Batch curated read: resolve up to GET_ENTRIES_MAX uuids in the order requested,
+ * optionally truncating each body to `maxChars`. Unknown uuids are returned in
+ * `missing`, not thrown — a partial hit is still useful for bulk reading.
+ */
+export function getEntries(db: Database, uuids: string[], opts: GetEntriesOptions = {}): GetEntriesResult {
+  const entries: CuratedEntry[] = [];
+  const missing: string[] = [];
+  for (const uuid of uuids.slice(0, GET_ENTRIES_MAX)) {
+    const entry = getEntry(db, uuid, opts);
+    if (!entry) {
+      missing.push(uuid);
+      continue;
+    }
+    if (opts.maxChars !== undefined && entry.text && entry.text_length > opts.maxChars) {
+      const extra = entry.text_length - opts.maxChars;
+      entry.text = `${sliceCodePoints(entry.text, opts.maxChars)}…[truncated ${extra} more chars]`;
+    }
+    entries.push(entry);
+  }
+  return { entries, missing };
+}
+
+export interface StatsBucket {
+  key: string;
+  entries: number;
+  text_chars: number;
+  starred: number;
+}
+
+export interface Stats {
+  overall: {
+    entries: number;
+    first_date: string | null;
+    last_date: string | null;
+    total_text_chars: number;
+  };
+  buckets: StatsBucket[];
+}
+
+/**
+ * The corpus map: aggregate counts + text volume over the whole (optionally
+ * filtered) journal, grouped by year / month / journal. Pure SQL aggregation — no
+ * entry text leaves the DB — so it is the cheap first call for any longitudinal
+ * or overview question ("shape of my last 10 years") before reading any entry.
+ */
+export function getStats(
+  db: Database,
+  groupBy: "year" | "month" | "journal",
+  filters: ListFilters = {},
+): Stats {
+  const { clauses, params } = entryFilterClauses(filters);
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const keyExpr = {
+    year: "substr(e.creation_date, 1, 4)",
+    month: "substr(e.creation_date, 1, 7)",
+    journal: "j.name",
+  }[groupBy];
+
+  const overall = db
+    .query(
+      `SELECT COUNT(*) AS entries, MIN(e.creation_date) AS first_date,
+              MAX(e.creation_date) AS last_date,
+              COALESCE(SUM(LENGTH(e.text)), 0) AS total_text_chars
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       ${where}`,
+    )
+    .get(params) as Stats["overall"];
+
+  const buckets = db
+    .query(
+      `SELECT ${keyExpr} AS key, COUNT(*) AS entries,
+              COALESCE(SUM(LENGTH(e.text)), 0) AS text_chars,
+              SUM(e.starred) AS starred
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       ${where}
+       GROUP BY key ORDER BY key`,
+    )
+    .all(params) as StatsBucket[];
+
+  return { overall, buckets };
 }
 
 /** Media METADATA attached to one entry (never bytes), in entry order. */
@@ -201,21 +525,32 @@ function entryFilterClauses(filters: ListFilters): {
 
 /**
  * Full-text search over entry bodies, optionally narrowed by the same structured
- * filters as listEntries (journal / tag / date range / place / starred). Ranked
- * by FTS relevance, so "coffee in 2021, journal Trips" is one call. The text
- * query is required; every filter is optional and ANDs onto the match.
+ * filters as listEntries (journal / tag / date range / place / starred). Each hit
+ * carries its journal name and tags for context.
+ *
+ * Hybrid tokenization: if any whitespace-split term contains CJK codepoints the
+ * query routes through a LIKE-substring path (every term must match, newest
+ * first, hand-built snippet) — FTS5 `unicode61` does not segment CJK, so a
+ * 2-char Chinese word like 咖啡 matches nothing via MATCH but everything via
+ * LIKE. Otherwise the FTS5 path is used unchanged: relevance ranking, snippet(),
+ * and typed InvalidSearchQueryError on malformed syntax.
  */
 export function searchEntries(db: Database, query: string, filters: ListFilters = {}): EntrySummary[] {
+  const terms = validatedSearchTerms(query);
+  if (terms.some(hasCjk)) return searchEntriesLike(db, terms, filters);
+
   const { clauses, params } = entryFilterClauses(filters);
   params.$q = query;
   params.$limit = filters.limit ?? 25;
   params.$offset = filters.offset ?? 0;
 
   try {
-    return db
+    const rows = db
       .query(
         `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
-                snippet(entry_fts, 1, '[', ']', ' … ', 12) AS snippet
+                j.name AS journal, LENGTH(e.text) AS text_length,
+                snippet(entry_fts, 1, '[', ']', ' … ', 12) AS snippet,
+                ${TAG_LIST_SUBQUERY}
          FROM entry_fts
          JOIN entry e ON e.uuid = entry_fts.uuid
          JOIN journal j ON j.id = e.journal_id
@@ -223,7 +558,8 @@ export function searchEntries(db: Database, query: string, filters: ListFilters 
          ORDER BY rank
          LIMIT $limit OFFSET $offset`,
       )
-      .all(params) as EntrySummary[];
+      .all(params) as (EntrySummary & { tag_list: string | null })[];
+    return rows.map(({ tag_list, ...e }) => ({ ...e, tags: splitTags(tag_list) }));
   } catch (err) {
     if (isFtsQueryError(err)) {
       throw new InvalidSearchQueryError(
@@ -237,6 +573,41 @@ export function searchEntries(db: Database, query: string, filters: ListFilters 
 }
 
 /**
+ * CJK-capable substring search: every term must appear in the body
+ * (`text LIKE '%term%'`, AND-combined, wildcard-escaped, ASCII-case-insensitive),
+ * newest first, with a hand-built snippet. Structured filters apply identically
+ * to the FTS path via entryFilterClauses.
+ */
+function searchEntriesLike(db: Database, terms: string[], filters: ListFilters): EntrySummary[] {
+  const { clauses, params } = entryFilterClauses(filters);
+  const likeClauses = terms.map((t, i) => {
+    params[`$t${i}`] = `%${escapeLike(t)}%`;
+    return `e.text LIKE $t${i} ESCAPE '\\'`;
+  });
+  params.$limit = filters.limit ?? 25;
+  params.$offset = filters.offset ?? 0;
+
+  const where = [...likeClauses, ...clauses].join(" AND ");
+  const rows = db
+    .query(
+      `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
+              j.name AS journal, e.text AS full_text, LENGTH(e.text) AS text_length,
+              ${TAG_LIST_SUBQUERY}
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       WHERE ${where}
+       ORDER BY e.creation_date DESC, e.uuid
+       LIMIT $limit OFFSET $offset`,
+    )
+    .all(params) as (EntrySummary & { full_text: string | null; tag_list: string | null })[];
+
+  return rows.map(({ full_text, tag_list, ...e }) => ({
+    ...e,
+    snippet: full_text ? buildSnippet(full_text, terms) : null,
+    tags: splitTags(tag_list),
+  }));
+}
+
+/**
  * Structured browse: filter by journal / tag / date range / place / starred and
  * page through the results, newest first. No text query — this is the complement
  * to searchEntries, for "the last N entries", "everything tagged code in 2023",
@@ -247,23 +618,31 @@ export function listEntries(db: Database, filters: ListFilters = {}): EntrySumma
   params.$limit = filters.limit ?? 50;
   params.$offset = filters.offset ?? 0;
 
+  const orderBy = {
+    date: "e.creation_date DESC, e.uuid",
+    length: "LENGTH(e.text) DESC, e.uuid",
+    editing_time: "e.editing_time DESC, e.uuid",
+  }[filters.order_by ?? "date"];
+
+  // include_text returns the full body; otherwise a cheap 140-char snippet.
+  const bodyCol = filters.include_text ? "e.text AS text" : "substr(e.text, 1, 140) AS snippet";
+
   const rows = db
     .query(
       `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
-              substr(e.text, 1, 140) AS snippet,
-              (SELECT group_concat(t.name, char(10) ORDER BY t.name)
-               FROM entry_tag et JOIN tag t ON t.id = et.tag_id
-               WHERE et.entry_uuid = e.uuid) AS tag_list
+              j.name AS journal, LENGTH(e.text) AS text_length,
+              ${bodyCol},
+              ${TAG_LIST_SUBQUERY}
        FROM entry e JOIN journal j ON j.id = e.journal_id
        ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
-       ORDER BY e.creation_date DESC, e.uuid
+       ORDER BY ${orderBy}
        LIMIT $limit OFFSET $offset`,
     )
     .all(params) as (Omit<EntrySummary, "tags"> & { tag_list: string | null })[];
 
   return rows.map(({ tag_list, ...e }) => ({
     ...e,
-    tags: tag_list ? tag_list.split("\n") : [],
+    tags: splitTags(tag_list),
   }));
 }
 
@@ -286,6 +665,7 @@ export function onThisDay(db: Database, md: string, limit = 50): EntrySummary[] 
   return db
     .query(
       `SELECT uuid, creation_date, place_name, starred,
+              LENGTH(text) AS text_length,
               substr(text, 1, 140) AS snippet
        FROM entry
        WHERE substr(creation_date, 6, 5) = ?
