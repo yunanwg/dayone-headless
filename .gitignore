@@ -20,6 +20,9 @@ profiles/
 .chromium-profile/
 user-data-dir/
 
+# Local agent worktrees
+.claude/worktrees/
+
 # The decrypted local mirror and any journal data
 mirror.db
 mirror.db-*
