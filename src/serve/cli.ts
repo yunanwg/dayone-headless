@@ -4,6 +4,7 @@
  * refreshes it (REST ingester); `mcp` serves it over MCP; `doctor` self-checks.
  *
  *   daytwo sync                 fetch + decrypt + write the mirror (needs env)
+ *   daytwo media-fetch [uuid]   fetch + decrypt attachment BYTES into data/media
  *   daytwo mcp                  run the read-only MCP server (stdio)
  *   daytwo doctor               check config + mirror health
  *   daytwo journals             list journals + counts + freshness
@@ -101,6 +102,23 @@ switch (cmd) {
     break;
   }
 
+  case "media-fetch": {
+    const { syncMedia } = await import("../ingest/rest/media.ts");
+    const key = process.env.DAYONE_ENCRYPTION_KEY;
+    if (!key) throw new Error("set DAYONE_ENCRYPTION_KEY (the D1-<userId>-<code…> encryption key)");
+    // `media-fetch <uuid>` scopes to one entry; `--limit N` caps new downloads.
+    const uuid = rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined;
+    const li = rest.indexOf("--limit");
+    const limit = li >= 0 ? Number(rest[li + 1]) : undefined;
+    const t0 = Date.now();
+    const s = await syncMedia(key, { entryUuid: uuid, limit, onProgress: (m) => console.error(m) });
+    console.error(
+      `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${s.fetched} fetched, ${s.alreadyCached} cached, ` +
+        `${s.md5Mismatch} md5-mismatch, ${s.failed} failed of ${s.total} media → data/media`,
+    );
+    break;
+  }
+
   case "mcp": {
     await import("./mcp.ts"); // self-connects over stdio
     break;
@@ -190,7 +208,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | on-this-day [MM-DD]",
+      "commands: sync | media-fetch [uuid] | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }
