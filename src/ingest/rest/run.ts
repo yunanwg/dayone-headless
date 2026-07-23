@@ -21,8 +21,13 @@ const api = new DayOneApi(apiConfigFromEnv());
 const reader = new RestReader(api, masterKey);
 
 const keys = await reader.unlockKeys();
+const journalKeyCount = [...keys.journalKeyByJournalId.values()].reduce(
+  (total, journalKeys) => total + journalKeys.size,
+  0,
+);
 console.error(
-  `unlocked user key + ${keys.journalPrivByFingerprint.size} journal key(s) across ${keys.journals.length} journals`,
+  `unlocked user key + ${journalKeyCount} journal key(s) across ${keys.journals.length} journals; ` +
+    `D1 signature policy ${keys.authenticity.policy}`,
 );
 
 const maxPerJournal = process.env.DAYONE_MAX_ENTRIES ? Number(process.env.DAYONE_MAX_ENTRIES) : Infinity;
@@ -34,11 +39,16 @@ for (const j of keys.journals) {
   let n = 0;
   for await (const e of reader.decryptJournal(j.id, keys)) {
     n++;
-    if (n === 1)
-      console.error(`  journal ${journalNumber}: first entry decrypted (${e.content.length} chars)`);
+    if (n === 1) {
+      console.error(`  journal ${journalNumber} sample: ${e.content.length} chars decrypted`);
+    }
     if (n >= maxPerJournal) break;
   }
   total += n;
-  console.error(`  journal complete: ${n} entries decrypted${n >= maxPerJournal ? " (capped)" : ""}`);
+  console.error(`  journal ${journalNumber}: ${n} entries decrypted${n >= maxPerJournal ? " (capped)" : ""}`);
 }
+console.error(
+  `D1 signatures: ${keys.authenticity.verified} verified, ` +
+    `${keys.authenticity.unsignedAccepted} unsigned accepted (${keys.authenticity.policy})`,
+);
 console.error(`done — ${total} entries decrypted from env alone, no browser`);

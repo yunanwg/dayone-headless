@@ -6,6 +6,11 @@
  */
 
 import type { Database } from "bun:sqlite";
+import {
+  isVerificationPolicy,
+  REST_CONTENT_VERIFICATION_VERSION,
+  type VerificationPolicy,
+} from "./verification.ts";
 
 export type SyncState = "running" | "complete" | "degraded" | "failed" | "unknown";
 
@@ -23,6 +28,10 @@ export interface SyncOutcome {
   attemptedAt: string;
   failedEntries: number;
   source?: string;
+  /** Written only for a complete REST attempt that revalidated the full corpus. */
+  verificationVersion?: number;
+  /** Minimum D1 signature policy satisfied by the completed REST corpus. */
+  verificationPolicy?: VerificationPolicy;
 }
 
 export class StaleSyncAttemptError extends Error {
@@ -47,6 +56,10 @@ const META_KEYS = {
   lastCompleteAt: "sync_last_complete_at",
   failedEntries: "sync_failed_entries",
   generation: "sync_generation",
+  verificationVersion: "rest_content_verification_version",
+  verificationPolicy: "rest_content_verification_policy",
+  verificationRequiredPolicy: "rest_content_verification_required_policy",
+  mediaVerificationRequiredPolicy: "media_verification_required_policy",
 } as const;
 
 const isStoredState = (value: string | undefined): value is Exclude<SyncState, "unknown"> =>
@@ -58,7 +71,7 @@ export function readSyncStatus(db: Database): SyncStatus {
     const rows = db
       .query(
         `SELECT key, value FROM meta
-         WHERE key IN (?1, ?2, ?3, ?4, ?5, ?6)`,
+         WHERE key IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
       )
       .all(
         META_KEYS.syncedAt,
@@ -67,15 +80,39 @@ export function readSyncStatus(db: Database): SyncStatus {
         META_KEYS.lastCompleteAt,
         META_KEYS.failedEntries,
         META_KEYS.generation,
+        META_KEYS.source,
+        META_KEYS.verificationVersion,
+        META_KEYS.verificationPolicy,
+        META_KEYS.verificationRequiredPolicy,
       ) as { key: string; value: string | null }[];
     const meta = new Map(rows.map((row) => [row.key, row.value ?? ""]));
     const legacySyncedAt = meta.get(META_KEYS.syncedAt) || null;
     const storedState = meta.get(META_KEYS.status);
-    const status: SyncState = isStoredState(storedState)
+    const storedStatus: SyncState = isStoredState(storedState)
       ? storedState
       : legacySyncedAt
         ? "complete"
         : "unknown";
+    const parsedVerificationVersion = Number(meta.get(META_KEYS.verificationVersion));
+    const verificationVersion =
+      Number.isSafeInteger(parsedVerificationVersion) && parsedVerificationVersion >= 0
+        ? parsedVerificationVersion
+        : 0;
+    const verificationPolicy = meta.get(META_KEYS.verificationPolicy);
+    const verificationRequiredPolicy = meta.get(META_KEYS.verificationRequiredPolicy);
+    // A mirror produced by REST before the current verification generation must
+    // not keep advertising a complete API-observed mirror before its one-time
+    // revalidation run.
+    const status: SyncState =
+      storedStatus === "complete" &&
+      meta.get(META_KEYS.source) === "rest" &&
+      (verificationVersion < REST_CONTENT_VERIFICATION_VERSION ||
+        !isVerificationPolicy(verificationPolicy) ||
+        (isVerificationPolicy(verificationRequiredPolicy) &&
+          verificationRequiredPolicy === "strict" &&
+          verificationPolicy !== "strict"))
+        ? "degraded"
+        : storedStatus;
     const parsedFailures = Number(meta.get(META_KEYS.failedEntries));
     const parsedGeneration = Number(meta.get(META_KEYS.generation));
     return {
@@ -130,12 +167,94 @@ export function recordSyncOutcome(
       setMeta.run(META_KEYS.failedEntries, String(outcome.failedEntries));
       if (outcome.source) setMeta.run(META_KEYS.source, outcome.source);
       if (outcome.status === "complete") {
+        if (outcome.verificationVersion !== undefined) {
+          setMeta.run(META_KEYS.verificationVersion, String(outcome.verificationVersion));
+        }
+        if (outcome.verificationPolicy !== undefined) {
+          setMeta.run(META_KEYS.verificationPolicy, outcome.verificationPolicy);
+        }
         setMeta.run(META_KEYS.syncedAt, outcome.attemptedAt);
         setMeta.run(META_KEYS.lastCompleteAt, outcome.attemptedAt);
       }
       return readSyncStatus(db);
     })
     .immediate();
+}
+
+/** Missing/invalid values are generation zero and therefore require revalidation. */
+export function readRestVerificationVersion(db: Database): number {
+  try {
+    const row = db.query("SELECT value FROM meta WHERE key = ?").get(META_KEYS.verificationVersion) as {
+      value: string | null;
+    } | null;
+    const parsed = Number(row?.value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export interface RestVerificationState {
+  version: number;
+  policy?: VerificationPolicy;
+  requiredPolicy?: VerificationPolicy;
+  mediaRequiredPolicy?: VerificationPolicy;
+}
+
+/** Missing/invalid policy is untrusted and cannot satisfy either current policy. */
+export function readRestVerificationState(db: Database): RestVerificationState {
+  try {
+    const rows = db
+      .query("SELECT key, value FROM meta WHERE key IN (?1, ?2, ?3, ?4)")
+      .all(
+        META_KEYS.verificationVersion,
+        META_KEYS.verificationPolicy,
+        META_KEYS.verificationRequiredPolicy,
+        META_KEYS.mediaVerificationRequiredPolicy,
+      ) as {
+      key: string;
+      value: string | null;
+    }[];
+    const meta = new Map(rows.map((row) => [row.key, row.value]));
+    const parsed = Number(meta.get(META_KEYS.verificationVersion));
+    const policy = meta.get(META_KEYS.verificationPolicy);
+    const requiredPolicy = meta.get(META_KEYS.verificationRequiredPolicy);
+    const mediaRequiredPolicy = meta.get(META_KEYS.mediaVerificationRequiredPolicy);
+    return {
+      version: Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0,
+      policy: isVerificationPolicy(policy) ? policy : undefined,
+      requiredPolicy: isVerificationPolicy(requiredPolicy) ? requiredPolicy : undefined,
+      ...(isVerificationPolicy(mediaRequiredPolicy) ? { mediaRequiredPolicy } : {}),
+    };
+  } catch {
+    return { version: 0 };
+  }
+}
+
+/** Persist the standalone media-fetch policy floor before unlock/network work. */
+export function recordMediaVerificationRequirement(db: Database, policy: VerificationPolicy): void {
+  db.query(
+    `INSERT INTO meta (key, value) VALUES (?1, ?2)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(META_KEYS.mediaVerificationRequiredPolicy, policy);
+}
+
+/**
+ * Persist the policy requested by the active attempt before processing content.
+ * Serving uses this floor immediately, even if strict revalidation later fails.
+ */
+export function recordRestVerificationRequirement(
+  db: Database,
+  expectedGeneration: number,
+  policy: VerificationPolicy,
+): void {
+  db.transaction(() => {
+    assertSyncAttempt(db, expectedGeneration);
+    db.query(
+      `INSERT INTO meta (key, value) VALUES (?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(META_KEYS.verificationRequiredPolicy, policy);
+  }).immediate();
 }
 
 /**

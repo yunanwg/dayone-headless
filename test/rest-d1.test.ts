@@ -1,150 +1,271 @@
 /**
- * D1 envelope + decrypt-chain tests. Synthetic only: we generate keys, BUILD D1
- * blobs the way Day One does, then assert our parser/decryptor recovers them.
+ * Synthetic D1 framing, checksum, signature, and decrypt-chain tests.
+ * No account-derived bytes or identifiers are used.
  */
 
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { deriveMasterAesKey, parseMasterKey } from "../src/ingest/rest/crypto.ts";
+import { deriveMasterAesKey, keyFingerprint, parseMasterKey } from "../src/ingest/rest/crypto.ts";
 import {
+  decryptAttachment,
   decryptEntryContent,
   decryptJournalPrivateKey,
   decryptUserPrivateKey,
   entryD1Body,
+  gunzipD1Format2,
   MAX_D1_GZIP_LAYERS,
+  MAX_ENTRY_PLAINTEXT_BYTES,
   maybeGunzip,
   parseD1,
+  type VerifiedJournalKey,
 } from "../src/ingest/rest/d1.ts";
 
 const subtle = globalThis.crypto.subtle;
-const cat = (...a: Uint8Array[]) => {
-  const n = a.reduce((s, x) => s + x.length, 0);
-  const o = new Uint8Array(n);
-  let p = 0;
-  for (const x of a) {
-    o.set(x, p);
-    p += x.length;
-  }
-  return o;
-};
-const bytes = (...n: number[]) => new Uint8Array(n);
-const rand = (n: number) => crypto.getRandomValues(new Uint8Array(n));
+const te = new TextEncoder();
+const td = new TextDecoder();
 
-async function gcmEncrypt(keyRaw: Uint8Array, iv: Uint8Array, pt: Uint8Array): Promise<Uint8Array> {
-  const k = await subtle.importKey("raw", keyRaw as BufferSource, { name: "AES-GCM" }, false, ["encrypt"]);
+const cat = (...parts: Uint8Array[]) => {
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+};
+const bytes = (...values: number[]) => new Uint8Array(values);
+const rand = (length: number) => crypto.getRandomValues(new Uint8Array(length));
+const md5 = (value: Uint8Array) => new Uint8Array(createHash("md5").update(value).digest());
+const seal = (...parts: Uint8Array[]) => {
+  const payload = cat(...parts);
+  return cat(payload, md5(payload));
+};
+
+async function gcmEncrypt(keyRaw: Uint8Array, iv: Uint8Array, plain: Uint8Array): Promise<Uint8Array> {
+  const key = await subtle.importKey("raw", keyRaw as BufferSource, { name: "AES-GCM" }, false, ["encrypt"]);
   return new Uint8Array(
-    await subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, k, pt as BufferSource),
-  ); // ct ‖ tag
+    await subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, plain as BufferSource),
+  );
 }
-async function genRsa() {
-  return (await subtle.generateKey(
+
+async function generateRsaMaterial() {
+  const pair = (await subtle.generateKey(
     { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-1" },
     true,
     ["encrypt", "decrypt"],
   )) as CryptoKeyPair;
+  const spki = new Uint8Array(await subtle.exportKey("spki", pair.publicKey));
+  const pkcs8 = new Uint8Array(await subtle.exportKey("pkcs8", pair.privateKey));
+  const verifyKey = await subtle.importKey(
+    "spki",
+    spki,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  const signingKey = await subtle.importKey(
+    "pkcs8",
+    pkcs8,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const fingerprint = await keyFingerprint(spki);
+  const verified: VerifiedJournalKey = {
+    fingerprint,
+    decryptKey: pair.privateKey,
+    verifyKey,
+  };
+  return { pair, spki, pkcs8, signingKey, verified };
 }
-async function toPem(priv: CryptoKey): Promise<string> {
-  const der = new Uint8Array(await subtle.exportKey("pkcs8", priv));
-  const b64 = btoa(String.fromCharCode(...der)).replace(/(.{64})/g, "$1\n");
-  return `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`;
+
+function toPem(der: Uint8Array, label: "PRIVATE KEY" | "PUBLIC KEY"): string {
+  const b64 = Buffer.from(der)
+    .toString("base64")
+    .replace(/(.{64})/g, "$1\n");
+  return `-----BEGIN ${label}-----\n${b64}\n-----END ${label}-----\n`;
 }
-const md5pad = bytes(...new Array(16).fill(0)); // parser strips it; content irrelevant
 
-test("parseD1 slices type-00 and type-02 layouts correctly", () => {
-  const iv = rand(12),
-    body = rand(40);
-  const t0 = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, body, md5pad);
-  const p0 = parseD1(t0);
-  expect(p0.type).toBe(0);
-  expect([...p0.iv]).toEqual([...iv]);
-  expect([...p0.body]).toEqual([...body]);
-
-  const fp = rand(32),
-    locked = rand(256);
-  const t2 = cat(bytes(0x44, 0x31, 0x01, 0x02), fp, bytes(0x00, 0x00), locked, iv, body, md5pad);
-  const p2 = parseD1(t2);
-  expect(p2.type).toBe(2);
-  expect(p2.lockedKey).toHaveLength(256);
-  expect([...p2.iv]).toEqual([...iv]);
-  expect([...p2.body]).toEqual([...body]);
-});
-
-test("decryptJournalPrivateKey (type-00) recovers a usable RSA key", async () => {
-  const journal = await genRsa();
-  const vaultKey = rand(32);
-  const iv = rand(12);
-  const pem = new TextEncoder().encode(await toPem(journal.privateKey));
-  const blob = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(vaultKey, iv, pem), md5pad);
-
-  const recovered = await decryptJournalPrivateKey(vaultKey, blob);
-  // Prove it's the same key: unwrap something wrapped to the journal's public key.
-  const secret = rand(32);
-  const wrapped = new Uint8Array(await subtle.encrypt({ name: "RSA-OAEP" }, journal.publicKey, secret));
-  const out = new Uint8Array(await subtle.decrypt({ name: "RSA-OAEP" }, recovered, wrapped));
-  expect([...out]).toEqual([...secret]);
-});
-
-test("decryptEntryContent (type-02) recovers plaintext, incl. gzip + JSON-header prefix", async () => {
-  const journal = await genRsa();
+async function hybridBlob(
+  material: Awaited<ReturnType<typeof generateRsaMaterial>>,
+  format: 1 | 2,
+  plaintext: Uint8Array,
+  signed = true,
+) {
   const contentKey = rand(32);
-  const lockedKey = new Uint8Array(await subtle.encrypt({ name: "RSA-OAEP" }, journal.publicKey, contentKey));
+  const lockedKey = new Uint8Array(
+    await subtle.encrypt({ name: "RSA-OAEP" }, material.pair.publicKey, contentKey),
+  );
+  const signature = signed
+    ? new Uint8Array(
+        await subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, material.signingKey, lockedKey as BufferSource),
+      )
+    : new Uint8Array();
   const iv = rand(12);
-  const known = "rest-synthetic-entry-plaintext-日记";
-  const gz = new Uint8Array(gzipSync(new TextEncoder().encode(known)));
-  const d1 = cat(
-    bytes(0x44, 0x31, 0x01, 0x02),
-    rand(32),
-    bytes(0, 0),
+  const body = await gcmEncrypt(contentKey, iv, plaintext);
+  const sigLength = bytes((signature.length >>> 8) & 0xff, signature.length & 0xff);
+  return seal(
+    bytes(0x44, 0x31, 0x01, format),
+    Uint8Array.from(Buffer.from(material.verified.fingerprint, "hex")),
+    sigLength,
+    signature,
     lockedKey,
     iv,
-    await gcmEncrypt(contentKey, iv, gz),
-    md5pad,
+    body,
   );
-  // Prepend a JSON header ‖ \n like getEntryContent() returns.
-  const blob = cat(new TextEncoder().encode('{"revision":{"entryId":"X"}}'), bytes(0x0a), d1);
+}
 
-  expect(entryD1Body(blob)[0]).toBe(0x44); // header stripped
-  const out = await decryptEntryContent(journal.privateKey, blob);
-  expect(new TextDecoder().decode(out)).toBe(known);
+test("parseD1 validates and preserves every current format field", async () => {
+  const iv = rand(12);
+  const body = rand(40);
+  const symmetric = seal(bytes(0x44, 0x31, 0x01, 0x00), iv, body);
+  const parsedSymmetric = parseD1(symmetric);
+  expect(parsedSymmetric).toMatchObject({ cryptoVersion: 1, type: 0 });
+  expect([...parsedSymmetric.iv]).toEqual([...iv]);
+  expect([...parsedSymmetric.body]).toEqual([...body]);
+
+  const material = await generateRsaMaterial();
+  const signed = await hybridBlob(material, 1, te.encode("synthetic attachment"));
+  const parsedSigned = parseD1(signed);
+  expect(parsedSigned.type).toBe(1);
+  expect(parsedSigned.signature).toHaveLength(256);
+  expect(parsedSigned.lockedKey).toHaveLength(256);
+  expect(parsedSigned.fingerprint).toHaveLength(32);
+  expect(parsedSigned.checksum).toHaveLength(16);
 });
 
-test("parseMasterKey splits D1-<userId>-<code…> into userId + password bytes", () => {
+test("parseD1 rejects bad magic/version/type/length/truncation and checksum tampering", () => {
+  const iv = rand(12);
+  const body = rand(24);
+  const valid = seal(bytes(0x44, 0x31, 0x01, 0x00), iv, body);
+  const corruptChecksum = valid.slice();
+  corruptChecksum[corruptChecksum.length - 1] = corruptChecksum[corruptChecksum.length - 1]! ^ 1;
+  expect(() => parseD1(corruptChecksum)).toThrow("checksum mismatch");
+
+  expect(() => parseD1(seal(bytes(0x00, 0x31, 0x01, 0x00), iv, body))).toThrow("bad magic");
+  expect(() => parseD1(seal(bytes(0x44, 0x31, 0x02, 0x00), iv, body))).toThrow(
+    "unsupported crypto schema version",
+  );
+  expect(() => parseD1(seal(bytes(0x44, 0x31, 0x01, 0x03), iv, body))).toThrow("unsupported binary format");
+  expect(() =>
+    parseD1(seal(bytes(0x44, 0x31, 0x01, 0x02), rand(32), bytes(0, 1), bytes(0), rand(256), iv, body)),
+  ).toThrow("unsupported signature length");
+  expect(() => parseD1(seal(bytes(0x44, 0x31, 0x01, 0x02), rand(28)))).toThrow("truncated fingerprint");
+});
+
+test("valid signed entry and attachment verify before decrypting", async () => {
+  const material = await generateRsaMaterial();
+  const entryText = "rest-synthetic-entry-plaintext-日记";
+  const entryBlob = await hybridBlob(material, 2, new Uint8Array(gzipSync(te.encode(entryText))));
+  const prefixed = cat(te.encode('{"revision":{"entryId":"SYNTHETIC"}}\n'), entryBlob);
+  const entry = await decryptEntryContent(material.verified, parseD1(entryD1Body(prefixed)), false);
+  expect(entry.signature).toBe("verified");
+  expect(td.decode(entry.plain)).toBe(entryText);
+
+  const mediaText = "synthetic attachment bytes";
+  const attachment = await decryptAttachment(
+    material.verified,
+    parseD1(await hybridBlob(material, 1, te.encode(mediaText))),
+    false,
+  );
+  expect(attachment.signature).toBe("verified");
+  expect(td.decode(attachment.plain)).toBe(mediaText);
+});
+
+test("signature and fingerprint tampering fail closed even with a recomputed MD5", async () => {
+  const material = await generateRsaMaterial();
+  const valid = await hybridBlob(material, 2, new Uint8Array(gzipSync(te.encode("signed"))));
+
+  const tamperedSignaturePayload = valid.slice(0, -16);
+  tamperedSignaturePayload[40] = tamperedSignaturePayload[40]! ^ 1;
+  await expect(
+    decryptEntryContent(
+      material.verified,
+      parseD1(cat(tamperedSignaturePayload, md5(tamperedSignaturePayload))),
+      false,
+    ),
+  ).rejects.toThrow("signature verification failed");
+
+  const tamperedFingerprintPayload = valid.slice(0, -16);
+  tamperedFingerprintPayload[4] = tamperedFingerprintPayload[4]! ^ 1;
+  await expect(
+    decryptEntryContent(
+      material.verified,
+      parseD1(cat(tamperedFingerprintPayload, md5(tamperedFingerprintPayload))),
+      false,
+    ),
+  ).rejects.toThrow("fingerprint mismatch");
+});
+
+test("unsigned D1 is explicit: compatible accepts, strict rejects", async () => {
+  const material = await generateRsaMaterial();
+  const unsigned = parseD1(
+    await hybridBlob(material, 2, new Uint8Array(gzipSync(te.encode("server-created"))), false),
+  );
+  const compatible = await decryptEntryContent(material.verified, unsigned, false);
+  expect(compatible.signature).toBe("unsigned");
+  expect(td.decode(compatible.plain)).toBe("server-created");
+  await expect(decryptEntryContent(material.verified, unsigned, true)).rejects.toThrow(
+    "unsigned D1 envelope rejected by strict policy",
+  );
+});
+
+test("decryptJournalPrivateKey format 0 recovers a usable RSA key", async () => {
+  const material = await generateRsaMaterial();
+  const vaultKey = rand(32);
+  const iv = rand(12);
+  const blob = seal(
+    bytes(0x44, 0x31, 0x01, 0x00),
+    iv,
+    await gcmEncrypt(vaultKey, iv, te.encode(toPem(material.pkcs8, "PRIVATE KEY"))),
+  );
+  const recovered = await decryptJournalPrivateKey(vaultKey, blob);
+  const secret = rand(32);
+  const wrapped = await subtle.encrypt({ name: "RSA-OAEP" }, material.pair.publicKey, secret);
+  const output = new Uint8Array(await subtle.decrypt({ name: "RSA-OAEP" }, recovered, wrapped));
+  expect([...output]).toEqual([...secret]);
+});
+
+test("parseMasterKey and user-private-key chain round-trip", async () => {
   const { userId, passwordBytes } = parseMasterKey("D1-user123456-ABCDE-FGHJK");
   expect(userId).toBe("user123456");
-  expect(new TextDecoder().decode(passwordBytes)).toBe("ABCDEFGHJK"); // groups joined, dashes stripped
+  expect(td.decode(passwordBytes)).toBe("ABCDEFGHJK");
   expect(() => parseMasterKey("not-a-key")).toThrow();
-});
 
-test("decryptUserPrivateKey (master key → PBKDF2 → type-00) recovers the user key", async () => {
-  const user = await genRsa();
+  const material = await generateRsaMaterial();
   const masterKey = "D1-user123456-ABCDE-FGHJK-LMNPQ-RTUVW-XYZ23-46789";
-  const { keyRaw, userId } = await deriveMasterAesKey(masterKey);
-  expect(userId).toBe("user123456");
-  expect(keyRaw).toHaveLength(32);
-
+  const { keyRaw } = await deriveMasterAesKey(masterKey);
   const iv = rand(12);
-  const pem = new TextEncoder().encode(await toPem(user.privateKey));
-  const blob = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(keyRaw, iv, pem), md5pad);
-
+  const blob = seal(
+    bytes(0x44, 0x31, 0x01, 0x00),
+    iv,
+    await gcmEncrypt(keyRaw, iv, te.encode(toPem(material.pkcs8, "PRIVATE KEY"))),
+  );
   const recovered = await decryptUserPrivateKey(masterKey, blob);
   const secret = rand(32);
-  const wrapped = new Uint8Array(await subtle.encrypt({ name: "RSA-OAEP" }, user.publicKey, secret));
-  const out = new Uint8Array(await subtle.decrypt({ name: "RSA-OAEP" }, recovered, wrapped));
-  expect([...out]).toEqual([...secret]); // proves the recovered key is the user's
+  const wrapped = await subtle.encrypt({ name: "RSA-OAEP" }, material.pair.publicKey, secret);
+  expect([...new Uint8Array(await subtle.decrypt({ name: "RSA-OAEP" }, recovered, wrapped))]).toEqual([
+    ...secret,
+  ]);
 });
 
-test("maybeGunzip passes plain bytes through and inflates gzip", () => {
-  const plain = new TextEncoder().encode("not gzipped");
-  expect([...maybeGunzip(plain)]).toEqual([...plain]);
-  const gz = new Uint8Array(gzipSync(new TextEncoder().encode("hello")));
-  expect(new TextDecoder().decode(maybeGunzip(gz))).toBe("hello");
+test("binary format 2 requires exactly one bounded gzip layer", () => {
+  expect(() => gunzipD1Format2(te.encode("not gzipped"))).toThrow(
+    "D1 binary format 2 plaintext was not gzip",
+  );
+  expect(td.decode(gunzipD1Format2(new Uint8Array(gzipSync(te.encode("hello")))))).toBe("hello");
+  const oversized = new Uint8Array(MAX_ENTRY_PLAINTEXT_BYTES + 1);
+  expect(() => gunzipD1Format2(new Uint8Array(gzipSync(oversized)))).toThrow("size limit");
 });
 
-test("maybeGunzip bounds gzip bombs and nested layers before retaining plaintext", () => {
+test("nested gzip compatibility is bounded at every layer", () => {
   const bomb = new Uint8Array(gzipSync(new Uint8Array(4096)));
-  expect(() => maybeGunzip(bomb, 64)).toThrow(/safety limit/);
+  expect(() => maybeGunzip(bomb, 64)).toThrow("size limit");
 
-  let nested = new TextEncoder().encode("synthetic");
-  for (let i = 0; i <= MAX_D1_GZIP_LAYERS; i++) nested = new Uint8Array(gzipSync(nested));
-  expect(() => maybeGunzip(nested, 4096)).toThrow(/nesting limit/);
+  let nested = te.encode("synthetic");
+  for (let index = 0; index <= MAX_D1_GZIP_LAYERS; index++) {
+    nested = new Uint8Array(gzipSync(nested));
+  }
+  expect(() => maybeGunzip(nested, 4096)).toThrow("gzip nesting limit");
 });

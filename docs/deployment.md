@@ -218,18 +218,26 @@ origin reachability so proxy authentication cannot be bypassed.
   expects a successful request. In Cloudflare Access mode it expects the origin
   to reject a probe without an assertion, proving the local route and auth gate
   without claiming a live JWKS/signature check.
-- `DAYONE_HTTP_TIMEOUT_MS` bounds each upstream REST request (default 60000;
+- `DAYONE_HTTP_TIMEOUT_MS` bounds each upstream REST request (default 30000;
   range 1000–300000).
+- `DAYONE_HTTP_RETRIES` bounds retries for idempotent GETs (default 2, maximum
+  5); login POST is never blindly replayed. Concurrent response bodies share a
+  256 MiB weighted budget, and decrypt operations reserve separately for their
+  ciphertext/plaintext copies.
 - Every upstream body is consumed through a streaming decoded-byte ceiling:
-  login 64 KiB, journal manifest and user-key responses 4 MiB, an entries feed
+  login 64 KiB, user-key responses 1 MiB, journal manifests 4 MiB, an entries feed
   32 MiB, one encrypted entry 4 MiB, and one encrypted attachment 64 MiB.
   A manifest is additionally capped at 1,024 journals, a feed at 25,000 items,
   a whole sync at 100,000 observed entry references, retained mapped source at
   64 MiB per journal, and a media worklist at 100,000 rows. Feed lines are
   counted and parsed incrementally; malformed JSON fails closed. Decrypted D1
-  entry plaintext is capped at 16 MiB at every gzip layer with at most three
-  nested layers. Exceeding a boundary fails or degrades the attempt rather than
+  entry plaintext is capped at 8 MiB; official format-2 content requires exactly
+  one bounded gzip layer, while the compatibility helper bounds each of at most
+  three layers. Exceeding a boundary fails or degrades the attempt rather than
   aggregating unbounded memory.
+- Every present D1 signature is verified against the matching full-DER journal
+  key fingerprint. `DAYONE_REQUIRE_D1_SIGNATURES=1` also rejects documented
+  unsigned content; compatibility mode accepts it while reporting coverage.
 - `DAYONE_SYNC_INTERVAL` accepts integer seconds from 60–86400 (default 3600);
   `DAYONE_MIRROR_WAIT` accepts 1–3600 (default 300).
 - `DAYONE_SYNC_CONCURRENCY` accepts 1–64 (default 8);

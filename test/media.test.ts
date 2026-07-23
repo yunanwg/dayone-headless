@@ -13,9 +13,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decryptAttachment } from "../src/ingest/rest/d1.ts";
+import { decryptAttachment, parseD1 } from "../src/ingest/rest/d1.ts";
 import { type MediaJob, runMediaJobs } from "../src/ingest/rest/media.ts";
 import { isMediaCached, isValidMd5, mediaCachePath, prepareMediaPath } from "../src/media-cache.ts";
+import { MEDIA_CACHE_VERIFICATION_VERSION } from "../src/verification.ts";
 
 const MD5_A = "0123456789abcdef0123456789abcdef";
 
@@ -56,9 +57,9 @@ test("md5 path-traversal strings never join a path", () => {
   }
 });
 
-test("decryptAttachment round-trips a synthetic D1 type-2 envelope", async () => {
+test("decryptAttachment round-trips a synthetic unsigned D1 format-1 envelope in compatible mode", async () => {
   // Build the same envelope shape the S3 blob has: RSA-OAEP/SHA-1-wrapped 32-byte
-  // content key, AES-256-GCM body, trailing (unverified-by-decrypt) 16-byte md5.
+  // content key, AES-256-GCM body, and a verified trailing 16-byte MD5 checksum.
   const kp = (await crypto.subtle.generateKey(
     { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-1" },
     true,
@@ -76,26 +77,40 @@ test("decryptAttachment round-trips a synthetic D1 type-2 envelope", async () =>
   const plaintext = new TextEncoder().encode("the original file bytes \u{1F4F7}");
   const ctTag = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesKey, plaintext));
 
-  // magic "D1" ‖ ver 1 ‖ type 2 ‖ fingerprint(32) ‖ sigLen(0) ‖ lockedKey(256) ‖ iv(12) ‖ ct‖tag ‖ md5(16)
+  // magic "D1" ‖ crypto 1 ‖ format 1 ‖ fingerprint ‖ sigLen(0) ‖
+  // lockedKey ‖ iv ‖ ct‖tag ‖ md5(all preceding bytes)
   const parts = [
-    Uint8Array.of(0x44, 0x31, 0x01, 0x02),
-    new Uint8Array(32), // fingerprint (not consulted by decryptAttachment)
+    Uint8Array.of(0x44, 0x31, 0x01, 0x01),
+    new Uint8Array(32),
     Uint8Array.of(0x00, 0x00), // sigLen = 0
     lockedKey,
     iv,
     ctTag,
-    new Uint8Array(16), // trailing md5, stripped by parseD1
   ];
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const blob = new Uint8Array(total);
+  const payloadLength = parts.reduce((n, p) => n + p.length, 0);
+  const blob = new Uint8Array(payloadLength + 16);
   let off = 0;
   for (const p of parts) {
     blob.set(p, off);
     off += p.length;
   }
+  blob.set(new Uint8Array(createHash("md5").update(blob.subarray(0, payloadLength)).digest()), off);
 
-  const out = await decryptAttachment(kp.privateKey, blob);
-  expect(new TextDecoder().decode(out)).toBe("the original file bytes \u{1F4F7}");
+  const spki = await crypto.subtle.exportKey("spki", kp.publicKey);
+  const verifyKey = await crypto.subtle.importKey(
+    "spki",
+    spki,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  const out = await decryptAttachment(
+    { fingerprint: "0".repeat(64), decryptKey: kp.privateKey, verifyKey },
+    parseD1(blob),
+    false,
+  );
+  expect(out.signature).toBe("unsigned");
+  expect(new TextDecoder().decode(out.plain)).toBe("the original file bytes \u{1F4F7}");
 });
 
 /** Synthetic worklist: each job's bytes are derived from its index; md5 matches. */
@@ -139,13 +154,14 @@ test("runMediaJobs: verifies md5 before caching and skips already-cached files",
   // Pre-cache job 0; corrupt the fetcher for job 1.
   await Bun.write(prepareMediaPath(jobs[0]!.md5!, dir), bytesFor(jobs[0]!));
   let fetchCalls = 0;
+  const progress: string[] = [];
   const stats = await runMediaJobs(
     jobs,
     async (job) => {
       fetchCalls++;
       return job === jobs[1] ? new TextEncoder().encode("wrong bytes") : bytesFor(job);
     },
-    { concurrency: 2, cacheDir: dir },
+    { concurrency: 2, cacheDir: dir, onProgress: (message) => progress.push(message) },
   );
   expect(fetchCalls).toBe(3); // cached job never hits the fetcher
   expect(stats.alreadyCached).toBe(1);
@@ -157,6 +173,136 @@ test("runMediaJobs: verifies md5 before caching and skips already-cached files",
   expect(mode(dir)).toBe(0o700);
   expect(mode(mediaCachePath(jobs[2]!.md5!, dir))).toBe(0o600);
   expect(mode(mediaCachePath(jobs[3]!.md5!, dir))).toBe(0o600);
+  for (const job of jobs) {
+    expect(progress.join("\n")).not.toContain(job.identifier);
+  }
+});
+
+test("a legacy cached media file is fetched once under the new verification generation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "media-reverify-"));
+  const { jobs, bytesFor } = syntheticJobs(1);
+  const job = jobs[0]!;
+  await Bun.write(prepareMediaPath(job.md5!, dir), bytesFor(job));
+  job.verificationVersion = 0;
+  const marked: string[] = [];
+  let fetchCalls = 0;
+
+  const reverified = await runMediaJobs(
+    [job],
+    async (candidate) => {
+      fetchCalls++;
+      return bytesFor(candidate);
+    },
+    {
+      cacheDir: dir,
+      requiredVerificationVersion: MEDIA_CACHE_VERIFICATION_VERSION,
+      onVerified: (md5) => marked.push(md5),
+    },
+  );
+  expect(reverified.fetched).toBe(1);
+  expect(fetchCalls).toBe(1);
+  expect(marked).toEqual([job.md5!]);
+
+  job.verificationVersion = MEDIA_CACHE_VERIFICATION_VERSION;
+  job.verificationPolicy = "compatible";
+  const current = await runMediaJobs(
+    [job],
+    async () => {
+      fetchCalls++;
+      return bytesFor(job);
+    },
+    {
+      cacheDir: dir,
+      requiredVerificationVersion: MEDIA_CACHE_VERIFICATION_VERSION,
+    },
+  );
+  expect(current.alreadyCached).toBe(1);
+  expect(fetchCalls).toBe(1);
+});
+
+test("a compatible cache cannot satisfy strict media verification", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "media-policy-"));
+  const { jobs, bytesFor } = syntheticJobs(1);
+  const job = jobs[0]!;
+  await Bun.write(prepareMediaPath(job.md5!, dir), bytesFor(job));
+  job.verificationVersion = MEDIA_CACHE_VERIFICATION_VERSION;
+  job.verificationPolicy = "compatible";
+  const marked: { md5: string; policy: string }[] = [];
+  let fetchCalls = 0;
+
+  const strict = await runMediaJobs(
+    [job],
+    async (candidate) => {
+      fetchCalls++;
+      return bytesFor(candidate);
+    },
+    {
+      cacheDir: dir,
+      requiredVerificationVersion: MEDIA_CACHE_VERIFICATION_VERSION,
+      requiredVerificationPolicy: "strict",
+      onVerified: (md5, policy) => marked.push({ md5, policy }),
+    },
+  );
+  expect(strict.fetched).toBe(1);
+  expect(fetchCalls).toBe(1);
+  expect(marked).toEqual([{ md5: job.md5!, policy: "strict" }]);
+
+  job.verificationPolicy = "strict";
+  const reusable = await runMediaJobs(
+    [job],
+    async () => {
+      fetchCalls++;
+      return bytesFor(job);
+    },
+    {
+      cacheDir: dir,
+      requiredVerificationVersion: MEDIA_CACHE_VERIFICATION_VERSION,
+      requiredVerificationPolicy: "compatible",
+    },
+  );
+  expect(reusable.alreadyCached).toBe(1);
+  expect(fetchCalls).toBe(1);
+});
+
+test("media verification is invalidated before bytes are fetched or created", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "media-invalidate-"));
+  const { jobs, bytesFor } = syntheticJobs(1);
+  const job = jobs[0]!;
+  job.verificationVersion = MEDIA_CACHE_VERIFICATION_VERSION;
+  job.verificationPolicy = "strict";
+  const events: string[] = [];
+
+  const result = await runMediaJobs(
+    [job],
+    async (candidate) => {
+      events.push("fetch");
+      return bytesFor(candidate);
+    },
+    {
+      cacheDir: dir,
+      requiredVerificationVersion: MEDIA_CACHE_VERIFICATION_VERSION,
+      requiredVerificationPolicy: "compatible",
+      onBeforeFetch: () => events.push("invalidate"),
+      onVerified: () => {
+        events.push("mark");
+        throw new Error("synthetic marker failure");
+      },
+    },
+  );
+  expect(events).toEqual(["invalidate", "fetch", "mark"]);
+  expect(result.failed).toBe(1);
+  expect(isMediaCached(job.md5!, dir)).toBe(true);
+});
+
+test("concurrent jobs create a cache path once and require byte-exact agreement", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "media-create-once-"));
+  const { jobs, bytesFor } = syntheticJobs(1);
+  const duplicate = { ...jobs[0]!, identifier: "SYNTH-DUPLICATE" };
+  const result = await runMediaJobs([jobs[0]!, duplicate], async () => bytesFor(jobs[0]!), {
+    cacheDir: dir,
+    concurrency: 2,
+  });
+  expect(result).toMatchObject({ fetched: 2, failed: 0 });
 });
 
 test("runMediaJobs: a missing or malformed md5 is skipped up front, never fetched", async () => {
@@ -188,19 +334,18 @@ test("runMediaJobs: one failed download does not abort the rest", async () => {
   const stats = await runMediaJobs(
     jobs,
     async (job) => {
-      if (job === jobs[2]) {
-        throw new Error("https://token@private.synthetic.test/file /private/synthetic/cache");
-      }
+      if (job === jobs[2]) throw new Error("credential=query&path=/private/cache");
       return bytesFor(job);
     },
     { concurrency: 3, cacheDir: dir, onProgress: (message) => progress.push(message) },
   );
   expect(stats.failed).toBe(1);
   expect(stats.fetched).toBe(4);
-  expect(progress.join("\n")).not.toContain("token@");
-  expect(progress.join("\n")).not.toContain("/private/synthetic/cache");
-  expect(progress.join("\n")).not.toContain(jobs[2]!.identifier);
-  expect(progress.some((message) => message.includes("download or cache error"))).toBe(true);
+  const failure = progress.find((message) => message.startsWith("one media item failed"));
+  expect(failure).toBeDefined();
+  expect(failure).not.toContain("credential=");
+  expect(failure).not.toContain("/private/cache");
+  expect(failure).not.toContain(jobs[2]!.identifier);
 });
 
 const live = process.env.DAYONE_MEDIA_LIVE_TEST === "1";

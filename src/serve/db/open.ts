@@ -26,25 +26,45 @@ export function openMirror(
     readonly: !opts.writable,
     create: opts.writable === true,
   });
-  db.exec("PRAGMA foreign_keys = ON;");
-  // The MCP reader shares this file with the sync writer; without a busy_timeout
-  // a WAL checkpoint on the writer's side can hand the reader SQLITE_BUSY
-  // immediately instead of retrying. 5s is enough to ride out a checkpoint.
-  db.exec("PRAGMA busy_timeout = 5000;");
-  if (!opts.writable) {
-    // Read-only opens: belt-and-suspenders against any write ever reaching this
-    // connection (the `readonly: true` option above already prevents it at the
-    // file level; this rejects at the SQL layer too).
-    db.exec("PRAGMA query_only = ON;");
+  try {
+    db.exec("PRAGMA foreign_keys = ON;");
+    // The MCP reader shares this file with the sync writer; without a busy_timeout
+    // a WAL checkpoint on the writer's side can hand the reader SQLITE_BUSY
+    // immediately instead of retrying. 5s is enough to ride out a checkpoint.
+    db.exec("PRAGMA busy_timeout = 5000;");
+    if (!opts.writable) {
+      // Read-only opens: belt-and-suspenders against any write ever reaching this
+      // connection (the `readonly: true` option above already prevents it at the
+      // file level; this rejects at the SQL layer too).
+      db.exec("PRAGMA query_only = ON;");
+    }
+    if (opts.writable) {
+      db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+      // CREATE TABLE IF NOT EXISTS cannot add columns to mirrors created by an
+      // earlier verification schema. Treat their current cache rows as
+      // compatible-only; a later strict run must re-fetch them.
+      const mediaVerificationColumns = db.query("PRAGMA table_info(media_verification)").all() as {
+        name: string;
+      }[];
+      if (!mediaVerificationColumns.some((column) => column.name === "verification_policy")) {
+        db.transaction(() => {
+          db.exec(
+            `ALTER TABLE media_verification
+             ADD COLUMN verification_policy TEXT NOT NULL DEFAULT 'compatible'
+             CHECK (verification_policy IN ('compatible', 'strict'))`,
+          );
+        }).immediate();
+      }
+    }
+    // Opening/initializing SQLite may create the main file and WAL/SHM sidecars.
+    // The private umask protects the creation itself; this also tightens existing
+    // artifacts whose legacy permissions were broader.
+    if (opts.writable || opts.hardenPermissions !== false) {
+      prepareMirrorStorage(path, { createParent: opts.writable === true });
+    }
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
   }
-  if (opts.writable) {
-    db.exec(readFileSync(SCHEMA_PATH, "utf8"));
-  }
-  // Opening/initializing SQLite may create the main file and WAL/SHM sidecars.
-  // The private umask protects the creation itself; this also tightens existing
-  // artifacts whose legacy permissions were broader.
-  if (opts.writable || opts.hardenPermissions !== false) {
-    prepareMirrorStorage(path, { createParent: opts.writable === true });
-  }
-  return db;
 }

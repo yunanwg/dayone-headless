@@ -34,8 +34,9 @@ it as a clean CLI and MCP server over a local, decrypted **mirror**.
 - **CLI** — the same reads plus `sync` and a `doctor` health check.
 - **No Mac, no browser in production** — the shipping ingester is pure HTTPS +
   our own crypto. The Docker image contains no Chromium.
-- **Incremental, completeness-aware sync** — first sync is full; after that only
-  entries whose server revision changed are re-fetched and re-decrypted. A
+- **Incremental, completeness-aware sync** — the initial run requests every
+  API-reported revision; after that only changed revisions are re-fetched and
+  re-decrypted. A
   per-entry failure marks the attempt degraded without advancing the last
   complete freshness timestamp, and the unchanged revision is retried next run.
 - **Full-text search** over entry bodies (SQLite FTS5), with a CJK-capable
@@ -47,6 +48,10 @@ it as a clean CLI and MCP server over a local, decrypted **mirror**.
 - **Secrets from env or secret files** — direct values and Docker-style `_FILE`
   inputs are mutually exclusive, never logged, never committed; secret scanning
   runs in CI and pre-commit.
+- **Verified D1 framing** — strict version/type/length/MD5 parsing, full-DER key
+  fingerprint checks, and SHA256withRSA verification whenever a D1 signature is
+  present. Documented unsigned server-created content remains compatible by
+  default and is counted explicitly; strict deployments can reject it.
 
 ## Quickstart
 
@@ -69,6 +74,17 @@ Set at minimum, in `.env`:
   (the client self-mints a token from these).
 - `DAYONE_DEVICE_ID` — recommended; pin a 32-hex value so repeat runs register as
   the same device instead of a new one each time.
+
+Optional security/reliability controls:
+
+- `DAYONE_REQUIRE_D1_SIGNATURES=1` rejects unsigned entry/attachment blobs.
+  Default compatibility mode verifies every present signature but accepts and
+  reports documented `sigLen=0` content (for example server-created integrations).
+- `DAYONE_HTTP_TIMEOUT_MS` (default `30000`) bounds every Day One request,
+  including response-body consumption. `DAYONE_HTTP_RETRIES` (default `2`,
+  maximum `5`) applies only to idempotent GETs; login POST is never blindly
+  replayed. Endpoint-specific byte caps bound login/key metadata, journal/feed
+  metadata, entry bodies, and attachments independently.
 
 Then build the mirror and use it:
 
@@ -141,9 +157,10 @@ scripts: `bun run sync | mcp | cli | import | check | lint | format | typecheck 
 
 The mirror stores media **metadata** only; attachment **bytes** are fetched on
 request by `media-fetch` into a content-addressed, gitignored cache
-(`data/media/<md5>`, override with `DAYONE_MEDIA_DIR`). It is idempotent
-(already-cached files are skipped without a download) and each file is
-md5-verified before it is written, so a wrong decrypt is never cached.
+(`data/media/<md5>`, override with `DAYONE_MEDIA_DIR`). Files verified under the
+current generation and at least the mirror's D1 signature policy are skipped;
+older or weaker cache records are hidden and refetched. Each file is md5-verified
+before it is marked current, so a wrong decrypt is never served as verified.
 
 Decrypted local state is owner-only by default: the mirror database and its
 SQLite WAL/SHM sidecars, plus cached media files, are created as `0600`; their
@@ -367,6 +384,76 @@ Fields that legitimately differ between the export and the live REST feed
 reported for information only. The same check runs in `test/conformance.test.ts`
 when `CONFORMANCE_REST_DB` / `CONFORMANCE_EXPORT_DB` are set, and is skipped in CI
 where no real data exists.
+
+### D1 integrity and signature policy
+
+Before decryption, every D1 blob must have the documented magic, crypto version,
+binary format, bounded field lengths, complete GCM tag, and MD5 format checksum.
+Journal public-key fingerprints are recomputed over the complete DER encoding.
+When an entry or attachment carries a signature, the signature over its exact
+RSA-wrapped content-key bytes is verified with SHA256withRSA before unwrap.
+Invalid framing, checksum, fingerprint, or signature is not imported by a
+current-generation REST sync or written as a current-generation media cache
+item. Binary-format-2 entry plaintext must contain exactly one gzip layer and
+has a bounded decompressed size.
+
+The verification generation and the satisfied signature-policy strength are
+persisted. After a verification upgrade, or when moving a compatible corpus to
+strict mode, the REST mirror is reported as degraded and every retained entry is
+refetched even when its revision ID is unchanged; only a successful pass over
+all locally known and API-returned content can restore `complete`. Entry rows
+without REST revision state are revalidated when their journal mapping is
+unambiguous; otherwise they are preserved and keep the attempt degraded. Media
+cache files with an older generation or a weaker policy are hidden from CLI/MCP
+reads until `media-fetch` downloads and verifies them under the current
+requirements. Entry sync and standalone media fetch each persist their requested
+policy before network processing, so a failed strict upgrade still hides
+compatible-only state rather than silently reusing it.
+Before any media refetch, its old marker is invalidated in SQLite. Cache paths
+are published from a synced same-directory temporary file with collision-safe
+create semantics, and concurrent fetches must agree byte-for-byte. A crash or
+weaker concurrent fetch therefore cannot leave new bytes under an older strict
+marker.
+
+Feed absence is never treated as deletion. Only an explicit
+`deletionRequested` revision removes a stored entry; if a returned feed omits a
+stored row, the attempt is degraded and the row is preserved. An empty feed or
+empty journal set cannot establish a complete first snapshot because the API
+exposes no authenticated terminal/count invariant. A non-empty prefix on an
+initial sync
+cannot be distinguished locally from a complete feed, so official JSON-export
+conformance remains the independent completeness oracle. Decrypted entry UUIDs
+must exactly match their feed UUID before either content or revision state is
+written.
+
+Accordingly, REST sync status `complete` means API-reported/transport-observed
+completeness under these checks. It is not a cryptographic proof that the server
+returned the entire corpus; only independent JSON-export conformance establishes
+that stronger claim.
+
+Network and decrypt memory are bounded at three layers: endpoint byte/cardinality
+caps, a weighted aggregate response budget, and a decrypt budget that accounts
+for ciphertext/framing/plaintext copies. Encrypted attachments are capped at
+64 MiB, and entry writes flush in small batches instead of retaining a whole
+journal's plaintext.
+
+Day One also documents unsigned content (`signatureLength=0`) created by a
+server-side producer that has only the journal public key. Compatibility mode is
+therefore the default: it accepts such blobs and reports verified/unsigned counts
+in sync progress and the programmatic sync result. This mode cannot detect an
+attacker stripping a valid signature and recomputing the non-cryptographic MD5.
+Set `DAYONE_REQUIRE_D1_SIGNATURES=1` to close that downgrade boundary; unsigned
+entries then make the attempt degraded and are not imported, while unsigned media
+is not cached.
+
+Decryption keys are selected only from the requested journal's verified key set;
+a matching fingerprint from another journal cannot authorize the response.
+
+This is not claimed as a complete independent server-authenticity proof. The
+journal public key and fingerprint arrive together in the vault response. The
+client proves that they are internally consistent and that a signed blob matches
+that key, but it does not yet verify the vault's complete user-key `SignedUpdate`
+chain. The independent JSON-export conformance oracle remains necessary.
 
 ## Security
 

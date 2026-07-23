@@ -89,32 +89,36 @@ test("entries feed counts every non-empty line and rejects malformed or excessiv
 
 test("entries feed status and transport errors never echo a journal identifier", async () => {
   const journalId = "private-journal-identifier";
-  const api = new DayOneApi({
+  const baseConfig = {
     token: "synthetic-api-token",
     xUserAgent: "synthetic-agent",
     deviceInfo: "synthetic-device",
+    getRetries: 0,
+    retryBaseDelayMs: 0,
+  };
+  const statusApi = new DayOneApi({
+    ...baseConfig,
+    fetchImpl: async () => new Response("", { status: 503 }),
   });
-  const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
-    try {
-      await api.getEntriesFeed(journalId);
-      throw new Error("expected status failure");
-    } catch (error) {
-      expect(String(error)).not.toContain(journalId);
-      expect(String(error)).toContain("GET entries feed");
-    }
+    await statusApi.getEntriesFeed(journalId);
+    throw new Error("expected status failure");
+  } catch (error) {
+    expect(String(error)).not.toContain(journalId);
+    expect(String(error)).toContain("GET entries feed");
+  }
 
-    globalThis.fetch = (async () => {
+  const transportApi = new DayOneApi({
+    ...baseConfig,
+    fetchImpl: async () => {
       throw new Error(`transport failed for ${journalId}`);
-    }) as unknown as typeof fetch;
-    try {
-      await api.getEntriesFeed(journalId);
-      throw new Error("expected transport failure");
-    } catch (error) {
-      expect(String(error)).toBe("ApiError: upstream request failed");
-    }
-  } finally {
-    globalThis.fetch = originalFetch;
+    },
+  });
+  try {
+    await transportApi.getEntriesFeed(journalId);
+    throw new Error("expected transport failure");
+  } catch (error) {
+    expect(String(error)).not.toContain(journalId);
+    expect(String(error)).toContain("GET entries feed request failed");
   }
 });

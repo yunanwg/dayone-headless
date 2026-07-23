@@ -50,17 +50,82 @@ the journal itself.
   existing mirror, and the flat media cache. It does not infer or modify other
   dotenv paths.
 
-## Server authenticity (integrity vs. authenticity)
+## D1 integrity and the remaining authenticity boundary
 
-Content **integrity** is enforced: every entry/attachment is AES-GCM sealed under a
-content key wrapped to your key, so tampered ciphertext fails to decrypt. What is
-**not** yet enforced is server **authenticity**. The D1 envelope carries a signature
-(`type ≠ 0`), but the current code parses and skips it (`src/ingest/rest/d1.ts`) —
-it does not verify it. So a compromised or impersonated Day One server could serve
-**forged content** that still decrypts cleanly under the wrapped content key; we
-would not detect the forgery from the signature. The practical mitigations today
-are transport trust (HTTPS to Day One) and the byte-identical JSON-export
-conformance oracle. Verifying the envelope signature is a known gap.
+Every D1 blob processed by a current-generation REST ingestion is fail-closed on
+framing, supported crypto/binary versions, field lengths, its MD5 format
+checksum, and AES-GCM authentication. Format-2 plaintext must be exactly one gzip
+layer and decompression is bounded. Journal public keys are imported only after
+their declared fingerprint matches SHA-256 over the complete DER encoding. For
+binary formats 1/2, a present signature must verify as SHA256withRSA over the
+exact RSA-wrapped content-key bytes before that key is unwrapped.
+
+The verification generation and satisfied signature-policy strength are
+persisted. A REST mirror created by an older generation, or a compatible corpus
+opened under strict policy, is reported as degraded until every retained entry
+has been refetched, verified, and imported (or explicitly tombstoned); failures
+cannot advance those markers or the complete timestamp. Cached media with an
+older generation or weaker policy is not served and is refetched by
+`media-fetch` before it receives the current markers. Entry sync and standalone
+media fetch persist their requested policy before network processing, so
+compatible-only state remains hidden even if a strict upgrade attempt later
+fails.
+Media refetch invalidates its prior marker before network or file work begins.
+The content-addressed path is published from a synced same-directory temporary
+file with collision-safe create semantics; concurrent fetches may reuse it only
+after exact byte comparison. A crash therefore leaves bytes hidden instead of
+retaining a stale stronger marker.
+
+Day One's published format explicitly permits `signatureLength=0`: server-side
+producers such as integrations may know the journal public key without knowing
+the private key. The default **compatible** policy accepts those blobs and reports
+verified/unsigned counts during sync. This preserves documented content, but it
+also leaves a downgrade boundary: an attacker able to rewrite the blob can strip
+a signature and recompute MD5. MD5 is only a corruption checksum, not a MAC.
+
+Set **`DAYONE_REQUIRE_D1_SIGNATURES=1`** for the strict policy. It rejects all
+unsigned entry/attachment blobs, closing signature stripping at the cost of
+possibly rejecting legitimate server-created content. Strict rejection degrades
+an entry sync without importing that revision; media is not cached. Journal
+content keys are scoped to their owning journal, and decrypted entry identity
+must exactly equal the feed identity before any content or revision is written.
+
+The verification implemented here is still not a complete independent trust
+root for the Day One server. The vault response supplies both each journal public
+key and its fingerprint. Recomputing the fingerprint prevents mismatched or
+truncated key material, and the D1 signature proves possession of the matching
+private key, but this client does not yet verify the vault's complete user-key
+`SignedUpdate` chain. HTTPS trust and byte-identical comparison with an official
+JSON export remain part of the authenticity story; do not describe a successful
+D1 signature as proving the server itself is uncompromised.
+
+## Network failure handling
+
+All Day One requests use a bounded timeout and endpoint-specific response-byte
+limit. Transient network errors and selected retryable HTTP statuses receive a
+small, bounded retry budget only for idempotent GETs. Login POST is a single
+attempt and is never blindly replayed after an ambiguous timeout. An entry feed
+is rejected as a whole when JSON is malformed or an entry record is missing
+required cursor/revision fields; recognized non-entry framing records are
+ignored but still consume the line budget. Absence never drives deletion: only an explicit
+`deletionRequested` revision may remove a stored entry, while omitted stored rows
+degrade the attempt and remain preserved. An empty feed or empty journal set
+cannot mark a first snapshot complete. The protocol has no authenticated
+terminal/count invariant,
+so a non-empty first-sync prefix cannot be detected locally and official-export
+conformance remains necessary.
+
+Journals and feed records also have explicit cardinality limits. Concurrent
+responses share a weighted byte budget, entry/attachment decrypts reserve for
+ciphertext and plaintext copies, and mapped entries are flushed in bounded
+batches. Encrypted attachments are capped at 64 MiB.
+
+REST status `complete` therefore means API-reported/transport-observed
+completeness under the checks above, not cryptographic corpus completeness. The
+official JSON-export oracle is required for the latter claim.
+Errors and progress messages use stable generic labels: response bodies, request
+identifiers, journal names, raw URLs, credentials, query strings, local paths,
+and underlying exception messages are not reflected.
 
 ## Deploying safely
 

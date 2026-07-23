@@ -58,6 +58,35 @@ test("an existing mirror file gains the new index on its next writable open", ()
   }
 });
 
+test("an existing media-verification table gains a compatible policy column", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mirror-policy-"));
+  const path = join(dir, "mirror.db");
+  try {
+    const first = openMirror(path, { writable: true });
+    first.exec("DROP TABLE media_verification;");
+    first.exec(
+      `CREATE TABLE media_verification (
+        md5 TEXT PRIMARY KEY,
+        verification_version INTEGER NOT NULL
+      );`,
+    );
+    first.query("INSERT INTO media_verification VALUES (?1, ?2)").run("a".repeat(32), 1);
+    first.close();
+
+    const second = openMirror(path, { writable: true });
+    const columns = second.query("PRAGMA table_info(media_verification)").all() as {
+      name: string;
+    }[];
+    expect(columns.some((column) => column.name === "verification_policy")).toBe(true);
+    expect(second.query("SELECT verification_policy FROM media_verification").get()).toEqual({
+      verification_policy: "compatible",
+    });
+    second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("writable open creates private mirror files and sidecars under a private directory", () => {
   const root = mkdtempSync(join(tmpdir(), "mirror-permissions-"));
   const dir = join(root, "private-data");

@@ -6,7 +6,12 @@
 
 import type { Database } from "bun:sqlite";
 import { isMediaCached, MEDIA_DIR, mediaCachePath } from "../media-cache.ts";
-import { readSyncStatus, type SyncStatus } from "../sync-status.ts";
+import { readRestVerificationState, readSyncStatus, type SyncStatus } from "../sync-status.ts";
+import {
+  isVerificationPolicy,
+  MEDIA_CACHE_VERIFICATION_VERSION,
+  verificationPolicySatisfies,
+} from "../verification.ts";
 
 /**
  * A malformed or oversized search query. Thrown by `searchEntries` so callers
@@ -57,7 +62,33 @@ export function resolveMedia(db: Database, identifier: string, dir: string = MED
     .query("SELECT identifier, md5, kind, type FROM media WHERE identifier = ?")
     .get(identifier) as Omit<MediaFile, "cached" | "path"> | null;
   if (!row) return null;
-  const cached = row.md5 ? isMediaCached(row.md5, dir) : false;
+  let verificationCurrent = false;
+  if (row.md5) {
+    try {
+      const verificationState = readRestVerificationState(db);
+      const requiredPolicy =
+        verificationState.requiredPolicy === "strict" ||
+        verificationState.mediaRequiredPolicy === "strict" ||
+        verificationState.policy === "strict"
+          ? "strict"
+          : "compatible";
+      const verification = db
+        .query(
+          `SELECT verification_version AS version, verification_policy AS policy
+           FROM media_verification WHERE md5 = ?`,
+        )
+        .get(row.md5) as { version: number; policy: string } | null;
+      verificationCurrent =
+        verification?.version === MEDIA_CACHE_VERIFICATION_VERSION &&
+        isVerificationPolicy(verification.policy) &&
+        verificationPolicySatisfies(verification.policy, requiredPolicy);
+    } catch {
+      // A pre-verification mirror may be opened read-only before its next
+      // ingestion migration. Its legacy cache stays hidden, never trusted.
+      verificationCurrent = false;
+    }
+  }
+  const cached = row.md5 ? verificationCurrent && isMediaCached(row.md5, dir) : false;
   return { ...row, cached, path: cached && row.md5 ? mediaCachePath(row.md5, dir) : null };
 }
 

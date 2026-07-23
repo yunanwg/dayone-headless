@@ -83,8 +83,10 @@ This is what the Docker image ships.
   per-journal content keys → stream decrypted entries.
 - `sync.ts` — **incremental** sync into the mirror. The entry feed is
   metadata-only and cheap; only entries whose server `revisionId` changed since
-  the last sync are re-fetched and re-decrypted, and entries deleted upstream are
-  removed. First sync is full; subsequent syncs are cheap deltas.
+  the last sync are re-fetched and re-decrypted. Only explicit upstream
+  tombstones remove entries; feed absence preserves stored content and degrades
+  completeness. The initial run requests every API-reported revision; subsequent
+  syncs are cheap deltas.
 - `map.ts` — maps decrypted content to the export shape.
 
 The full protocol and crypto framing is documented in [protocol.md](protocol.md).

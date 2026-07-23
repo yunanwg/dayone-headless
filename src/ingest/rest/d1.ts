@@ -1,96 +1,182 @@
 /**
- * Day One "D1" envelope + the full content-decryption chain — a from-scratch,
- * browser-free reimplementation. Validated end-to-end against a known-plaintext
- * entry fetched via the REST client: recovers the exact plaintext.
+ * Day One "D1" envelope parsing, verification, and decryption.
  *
- * Envelope: "D1"(2) ‖ ver(0x01)(1) ‖ type(1) ‖ [type≠0: fingerprint(32) ‖
- * sigLen(uint16 BE)(2) ‖ signature(sigLen) ‖ lockedKey(256)] ‖ iv(12) ‖
- * cipherText ‖ gcmTag(16) ‖ md5(16). The trailing 16-byte MD5 covers bytes
- * [0..len-16) and must be stripped before AES-GCM (the GCM tag authenticates).
+ * Current documented layout:
+ * "D1" ‖ cryptoVersion(0x01) ‖ binaryFormat(0|1|2) ‖
+ * [format 1/2: fingerprint(32) ‖ signatureLength(u16be) ‖ signature ‖
+ * lockedKey(256)] ‖ iv(12) ‖ ciphertext ‖ gcmTag(16) ‖ md5(16).
  *
- *   type 0x00 — symmetric: AES-256-GCM with the raw 32-byte vault key (no KDF).
- *   type 0x01 — PBKDF2/passphrase (the user key; salt in payload).
- *   type 0x02 — RSA-hybrid: RSA-OAEP unwrap the 256-byte lockedKey → 32-byte
- *               content key → AES-256-GCM the body. Plaintext may be gzip'd.
+ * The MD5 is a format checksum, not a security boundary. AES-GCM authenticates
+ * the ciphertext. For formats 1/2, a present SHA256withRSA signature authenticates
+ * the RSA-wrapped content key against the journal public key.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { DecryptError } from "../../errors.ts";
 import { deriveMasterAesKey, importAesKey, rsaUnwrap } from "./crypto.ts";
 
 const subtle = globalThis.crypto.subtle;
 const td = new TextDecoder();
 const MD5_LEN = 16;
-export const MAX_D1_PLAINTEXT_BYTES = 16 * 1024 * 1024;
+const GCM_TAG_LEN = 16;
+const IV_LEN = 12;
+const FINGERPRINT_LEN = 32;
+const LOCKED_KEY_LEN = 256;
+const RSA_2048_SIGNATURE_LEN = 256;
+export const MAX_D1_ENVELOPE_BYTES = 512 * 1024 * 1024;
+export const MAX_ENTRY_PLAINTEXT_BYTES = 8 * 1024 * 1024;
+export const MAX_D1_PLAINTEXT_BYTES = MAX_ENTRY_PLAINTEXT_BYTES;
 export const MAX_D1_GZIP_LAYERS = 3;
 
+export type D1BinaryFormat = 0 | 1 | 2;
+export type D1SignatureDisposition = "verified" | "unsigned";
+
 export interface D1Envelope {
-  type: number;
+  cryptoVersion: 1;
+  type: D1BinaryFormat;
   iv: Uint8Array;
-  /** cipherText ‖ gcmTag, ready for WebCrypto AES-GCM (trailing md5 already removed). */
+  /** ciphertext ‖ GCM tag, ready for WebCrypto (the trailing MD5 is excluded). */
   body: Uint8Array;
-  /** type≠0 only: the RSA-wrapped content key (256B). */
+  /** Format 1/2 only: RSA-wrapped content key, and the exact signed bytes. */
   lockedKey?: Uint8Array;
-  /** type≠0 only: SHA-256 fingerprint of the journal key that wraps `lockedKey`. */
+  /** Format 1/2 only: SHA-256 fingerprint of the wrapping journal public key. */
   fingerprint?: Uint8Array;
+  /** Format 1/2 only. Empty means the producer had only the public key. */
+  signature?: Uint8Array;
+  /** The verified format checksum carried by the blob. */
+  checksum: Uint8Array;
 }
 
-export function parseD1(b: Uint8Array): D1Envelope {
-  if (b[0] !== 0x44 || b[1] !== 0x31) throw new Error(`not a D1 envelope (magic ${b[0]},${b[1]})`);
-  const type = b[3]!;
+export interface VerifiedJournalKey {
+  fingerprint: string;
+  decryptKey: CryptoKey;
+  verifyKey: CryptoKey;
+}
+
+function fail(message: string): never {
+  throw new DecryptError(`invalid D1 envelope: ${message}`);
+}
+
+function checkedSlice(
+  bytes: Uint8Array,
+  start: number,
+  length: number,
+  end: number,
+  field: string,
+): Uint8Array {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 0) {
+    fail(`invalid ${field} bounds`);
+  }
+  const next = start + length;
+  if (next > end || next < start) fail(`truncated ${field}`);
+  return bytes.slice(start, next);
+}
+
+/**
+ * Strictly parse and checksum one complete D1 blob. Returned byte fields are
+ * copies, so later mutation of the network buffer cannot change what is verified
+ * or decrypted.
+ */
+export function parseD1(input: Uint8Array): D1Envelope {
+  if (input.byteLength > MAX_D1_ENVELOPE_BYTES) fail("exceeds the supported size limit");
+  const bytes = input.slice();
+  if (bytes.length < 4 + IV_LEN + GCM_TAG_LEN + MD5_LEN) fail("too short");
+  if (bytes[0] !== 0x44 || bytes[1] !== 0x31) fail("bad magic");
+  if (bytes[2] !== 0x01) fail("unsupported crypto schema version");
+  const type = bytes[3];
+  if (type !== 0 && type !== 1 && type !== 2) fail("unsupported binary format");
+
+  const checksumStart = bytes.length - MD5_LEN;
+  const checksum = bytes.slice(checksumStart);
+  const calculated = createHash("md5").update(bytes.subarray(0, checksumStart)).digest();
+  if (!timingSafeEqual(calculated, checksum)) fail("checksum mismatch");
+
   let off = 4;
   let fingerprint: Uint8Array | undefined;
+  let signature: Uint8Array | undefined;
   let lockedKey: Uint8Array | undefined;
   if (type !== 0) {
-    fingerprint = b.slice(off, off + 32);
-    off += 32;
-    const sigLen = (b[off]! << 8) | b[off + 1]!;
+    fingerprint = checkedSlice(bytes, off, FINGERPRINT_LEN, checksumStart, "fingerprint");
+    off += FINGERPRINT_LEN;
+    const sigLenBytes = checkedSlice(bytes, off, 2, checksumStart, "signature length");
     off += 2;
-    off += sigLen; // signature (unused for decryption)
-    lockedKey = b.slice(off, off + 256);
-    off += 256;
+    const sigLen = (sigLenBytes[0]! << 8) | sigLenBytes[1]!;
+    if (sigLen !== 0 && sigLen !== RSA_2048_SIGNATURE_LEN) {
+      fail("unsupported signature length");
+    }
+    signature = checkedSlice(bytes, off, sigLen, checksumStart, "signature");
+    off += sigLen;
+    lockedKey = checkedSlice(bytes, off, LOCKED_KEY_LEN, checksumStart, "locked key");
+    off += LOCKED_KEY_LEN;
   }
-  const iv = b.slice(off, off + 12);
-  off += 12;
-  const body = b.slice(off, b.length - MD5_LEN); // strip trailing md5; keep ct ‖ tag
-  return { type, iv, body, lockedKey, fingerprint };
+
+  const iv = checkedSlice(bytes, off, IV_LEN, checksumStart, "IV");
+  off += IV_LEN;
+  const bodyLength = checksumStart - off;
+  if (bodyLength < GCM_TAG_LEN) fail("ciphertext has no complete GCM tag");
+  const body = checkedSlice(bytes, off, bodyLength, checksumStart, "ciphertext");
+
+  return {
+    cryptoVersion: 1,
+    type,
+    iv,
+    body,
+    lockedKey,
+    fingerprint,
+    signature,
+    checksum,
+  };
 }
 
 async function aesGcm(keyRaw: Uint8Array, iv: Uint8Array, body: Uint8Array): Promise<Uint8Array> {
-  const key = await importAesKey(keyRaw as BufferSource);
-  return new Uint8Array(
-    await subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, body as BufferSource),
-  );
+  try {
+    const key = await importAesKey(keyRaw as BufferSource);
+    return new Uint8Array(
+      await subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, body as BufferSource),
+    );
+  } catch {
+    throw new DecryptError("D1 AES-GCM decryption failed");
+  }
 }
 
-function pemToDer(pem: string): Uint8Array {
-  const b64 = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
-  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+export function pemToDer(pem: string, label: "PRIVATE KEY" | "PUBLIC KEY"): Uint8Array {
+  const match = pem
+    .trim()
+    .match(new RegExp(`^-----BEGIN ${label}-----\\s*([A-Za-z0-9+/=\\s]+?)\\s*-----END ${label}-----$`));
+  if (!match) throw new DecryptError(`invalid ${label.toLowerCase()} PEM`);
+  const compact = match[1]!.replace(/\s+/g, "");
+  if (!compact || compact.length % 4 !== 0) throw new DecryptError(`invalid ${label.toLowerCase()} PEM`);
+  try {
+    const decoded = Uint8Array.from(atob(compact), (c) => c.charCodeAt(0));
+    if (!decoded.length) throw new Error("empty");
+    return decoded;
+  } catch {
+    throw new DecryptError(`invalid ${label.toLowerCase()} PEM`);
+  }
 }
 
-function isGzip(u: Uint8Array): boolean {
-  return u[0] === 0x1f && u[1] === 0x8b;
+function isGzip(input: Uint8Array): boolean {
+  return input[0] === 0x1f && input[1] === 0x8b;
 }
 
-/** Inflate one gzip layer without allowing the decoded output to exceed a hard ceiling. */
-export function gunzipBounded(u: Uint8Array, maximumBytes: number): Uint8Array {
+/** Inflate one gzip layer without allowing its decoded output past the ceiling. */
+export function gunzipBounded(input: Uint8Array, maximumBytes: number): Uint8Array {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
     throw new RangeError("maximum gunzip bytes must be a positive safe integer");
   }
   try {
-    const out = new Uint8Array(gunzipSync(u, { maxOutputLength: maximumBytes }));
-    if (out.byteLength > maximumBytes) throw new Error("limit");
-    return out;
+    const output = new Uint8Array(gunzipSync(input, { maxOutputLength: maximumBytes }));
+    if (output.byteLength > maximumBytes) throw new Error("limit");
+    return output;
   } catch {
-    throw new Error(`D1 gzip output is invalid or exceeded the ${maximumBytes}-byte safety limit`);
+    throw new DecryptError("D1 gzip output is invalid or exceeded the size limit");
   }
 }
 
-/**
- * Un-gzip transparently (Day One binaryFormat≥2 gzips content), bounding every
- * layer before it can become retained decrypted source.
- */
+/** Compatibility helper for historical nested content; every layer is bounded. */
 export function maybeGunzip(
-  u: Uint8Array,
+  input: Uint8Array,
   maximumBytes = MAX_D1_PLAINTEXT_BYTES,
   maximumLayers = MAX_D1_GZIP_LAYERS,
 ): Uint8Array {
@@ -100,56 +186,58 @@ export function maybeGunzip(
   if (!Number.isSafeInteger(maximumLayers) || maximumLayers < 0) {
     throw new RangeError("maximum gzip layers must be a non-negative safe integer");
   }
-  if (u.byteLength > maximumBytes) {
-    throw new Error(`D1 plaintext exceeded the ${maximumBytes}-byte safety limit`);
+  if (input.byteLength > maximumBytes) {
+    throw new DecryptError("D1 plaintext exceeded the size limit");
   }
 
-  let out = u;
+  let output = input;
   let layers = 0;
-  while (isGzip(out)) {
+  while (isGzip(output)) {
     if (layers >= maximumLayers) {
-      throw new Error(`D1 content exceeded the ${maximumLayers}-layer gzip nesting limit`);
+      throw new DecryptError("D1 content exceeded the gzip nesting limit");
     }
-    out = gunzipBounded(out, maximumBytes);
+    output = gunzipBounded(output, maximumBytes);
     layers++;
   }
-  return out;
+  return output;
 }
 
-/** Decrypt a symmetric **D1 type-00** blob with a raw AES-256-GCM key → plaintext
- * bytes. Used for RSA private keys (below) and small values like journal names. */
-export async function decryptD1Symmetric(aesKeyRaw: Uint8Array, blob: Uint8Array): Promise<Uint8Array> {
-  const d = parseD1(blob);
-  return aesGcm(aesKeyRaw, d.iv, d.body);
+/** Strictly decode the single gzip layer required by binary format 2. */
+export function gunzipD1Format2(input: Uint8Array): Uint8Array {
+  if (!isGzip(input)) throw new DecryptError("D1 binary format 2 plaintext was not gzip");
+  const output = gunzipBounded(input, MAX_ENTRY_PLAINTEXT_BYTES);
+  if (isGzip(output)) throw new DecryptError("D1 binary format 2 contained nested gzip");
+  return output;
+}
+
+/** Decrypt a parsed binary-format-0 blob with its already-known AES key. */
+export async function decryptD1Symmetric(aesKeyRaw: Uint8Array, envelope: D1Envelope): Promise<Uint8Array> {
+  if (envelope.type !== 0) throw new DecryptError("expected D1 binary format 0");
+  return aesGcm(aesKeyRaw, envelope.iv, envelope.body);
 }
 
 /**
- * Decrypt an RSA private key stored as a **D1 type-00** blob (AES-256-GCM with a
- * raw key) → imported RSA-OAEP/SHA-1 key. Used for both the journal content key
- * (AES key = vault key) and the user key (AES key = K_pass from the master key).
+ * Decrypt an RSA private key stored in a binary-format-0 D1 blob and import it
+ * for RSA-OAEP/SHA-1 content-key unwraps.
  */
 export async function decryptD1PrivateKey(
   aesKeyRaw: Uint8Array,
   encryptedPrivateKey: Uint8Array,
 ): Promise<CryptoKey> {
-  const pem = td.decode(await decryptD1Symmetric(aesKeyRaw, encryptedPrivateKey)); // PKCS#8 PEM
-  return subtle.importKey(
-    "pkcs8",
-    pemToDer(pem) as BufferSource,
-    { name: "RSA-OAEP", hash: "SHA-1" },
-    false,
-    ["decrypt"],
-  );
+  const envelope = parseD1(encryptedPrivateKey);
+  const pem = td.decode(await decryptD1Symmetric(aesKeyRaw, envelope));
+  const der = pemToDer(pem, "PRIVATE KEY");
+  try {
+    return await subtle.importKey("pkcs8", der as BufferSource, { name: "RSA-OAEP", hash: "SHA-1" }, false, [
+      "decrypt",
+    ]);
+  } catch {
+    throw new DecryptError("invalid decrypted RSA private key");
+  }
 }
 
-/** The journal content private key: D1 type-00, unlocked by the vault key. */
 export const decryptJournalPrivateKey = decryptD1PrivateKey;
 
-/**
- * The USER's private key: derive K_pass from the master key `D1-<userId>-<code…>`,
- * then decrypt the type-00 `encryptedPrivateKey` (from `GET /api/users/key`). This
- * is the pure-passphrase path — no cached key, no browser.
- */
 export async function decryptUserPrivateKey(
   masterKey: string,
   encryptedPrivateKey: Uint8Array,
@@ -158,35 +246,88 @@ export async function decryptUserPrivateKey(
   return decryptD1PrivateKey(keyRaw, encryptedPrivateKey);
 }
 
-/** Strip the `<json header>\n` prefix an entry-content blob carries before its D1 body. */
+/** Extract the D1 portion from `<JSON envelope>\\n<D1 blob>`, without aliases. */
 export function entryD1Body(blob: Uint8Array): Uint8Array {
+  if (blob[0] === 0x44 && blob[1] === 0x31) return blob.slice();
   const nl = blob.indexOf(0x0a);
-  return nl >= 0 && blob[nl + 1] === 0x44 ? blob.slice(nl + 1) : blob;
+  if (nl < 0 || blob[nl + 1] !== 0x44 || blob[nl + 2] !== 0x31) {
+    throw new DecryptError("entry response did not contain a D1 body");
+  }
+  return blob.slice(nl + 1);
+}
+
+function fingerprintHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /**
- * Decrypt one entry's content (D1 type 0x02) given the journal private key.
- * Returns the (un-gzipped) plaintext bytes.
+ * Verify a format-1/2 envelope before unwrapping. Compatible mode accepts an
+ * explicitly unsigned blob because Day One documents server-created content
+ * with signatureLength=0. Strict mode rejects it, closing signature stripping.
  */
+export async function verifyD1Signature(
+  envelope: D1Envelope,
+  key: VerifiedJournalKey,
+  requireSignature: boolean,
+): Promise<D1SignatureDisposition> {
+  if (envelope.type === 0 || !envelope.fingerprint || !envelope.lockedKey || !envelope.signature) {
+    throw new DecryptError("D1 signature verification requires binary format 1 or 2");
+  }
+  if (fingerprintHex(envelope.fingerprint) !== key.fingerprint) {
+    throw new DecryptError("D1 journal-key fingerprint mismatch");
+  }
+  if (envelope.signature.length === 0) {
+    if (requireSignature) throw new DecryptError("unsigned D1 envelope rejected by strict policy");
+    return "unsigned";
+  }
+  let valid = false;
+  try {
+    valid = await subtle.verify(
+      { name: "RSASSA-PKCS1-v1_5" },
+      key.verifyKey,
+      envelope.signature as BufferSource,
+      envelope.lockedKey as BufferSource,
+    );
+  } catch {
+    valid = false;
+  }
+  if (!valid) throw new DecryptError("D1 locked-key signature verification failed");
+  return "verified";
+}
+
+async function decryptHybrid(
+  key: VerifiedJournalKey,
+  envelope: D1Envelope,
+  requireSignature: boolean,
+): Promise<{ plain: Uint8Array; signature: D1SignatureDisposition }> {
+  const signature = await verifyD1Signature(envelope, key, requireSignature);
+  let contentKey: Uint8Array;
+  try {
+    contentKey = await rsaUnwrap(key.decryptKey, envelope.lockedKey as BufferSource);
+  } catch {
+    throw new DecryptError("D1 content-key unwrap failed");
+  }
+  if (contentKey.length !== 32) throw new DecryptError("D1 content key was not 256 bits");
+  return { plain: await aesGcm(contentKey, envelope.iv, envelope.body), signature };
+}
+
+/** Decrypt one parsed entry body. Official entry JSON uses binary format 2. */
 export async function decryptEntryContent(
-  journalPriv: CryptoKey,
-  entryBlob: Uint8Array,
-): Promise<Uint8Array> {
-  const d = parseD1(entryD1Body(entryBlob));
-  if (!d.lockedKey) throw new Error(`entry D1 type ${d.type} has no lockedKey`);
-  const contentKey = await rsaUnwrap(journalPriv, d.lockedKey as BufferSource);
-  return maybeGunzip(await aesGcm(contentKey, d.iv, d.body));
+  key: VerifiedJournalKey,
+  envelope: D1Envelope,
+  requireSignature: boolean,
+): Promise<{ plain: Uint8Array; signature: D1SignatureDisposition }> {
+  if (envelope.type !== 2) throw new DecryptError("entry content was not D1 binary format 2");
+  const result = await decryptHybrid(key, envelope, requireSignature);
+  return { plain: gunzipD1Format2(result.plain), signature: result.signature };
 }
 
-/**
- * Decrypt one attachment (photo / video / audio / pdf) blob given the journal
- * content private key. Unlike entry content, an attachment blob is a bare D1
- * envelope — no `<json header>\n` prefix (so no `entryD1Body`) and NOT gzipped:
- * the AES-GCM plaintext IS the original file bytes. Returns those bytes.
- */
-export async function decryptAttachment(journalPriv: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
-  const d = parseD1(blob);
-  if (!d.lockedKey) throw new Error(`attachment D1 type ${d.type} has no lockedKey`);
-  const contentKey = await rsaUnwrap(journalPriv, d.lockedKey as BufferSource);
-  return aesGcm(contentKey, d.iv, d.body);
+/** Decrypt one parsed attachment. Official binary content uses format 1. */
+export async function decryptAttachment(
+  key: VerifiedJournalKey,
+  envelope: D1Envelope,
+  requireSignature: boolean,
+): Promise<{ plain: Uint8Array; signature: D1SignatureDisposition }> {
+  if (envelope.type !== 1) throw new DecryptError("attachment was not D1 binary format 1");
+  return decryptHybrid(key, envelope, requireSignature);
 }

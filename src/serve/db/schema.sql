@@ -66,7 +66,8 @@ CREATE INDEX IF NOT EXISTS entry_month_day_idx      ON entry(substr(creation_dat
 
 -- Per-entry sync state so the REST ingester can skip unchanged entries: only
 -- entries whose server `revision_id` differs from what we stored are re-fetched
--- and re-decrypted. First sync = full; subsequent syncs = cheap deltas.
+-- and re-decrypted. The initial REST run requests every API-reported revision;
+-- subsequent syncs are cheap deltas.
 CREATE TABLE IF NOT EXISTS entry_sync (
   uuid        TEXT PRIMARY KEY,
   journal_id  TEXT,
@@ -99,6 +100,17 @@ CREATE TABLE IF NOT EXISTS media (
 );
 
 CREATE INDEX IF NOT EXISTS media_entry_idx ON media(entry_uuid);
+
+-- A cached media file is visible to the serving layer only when its plaintext
+-- bytes were fetched/decrypted under the current verification generation and
+-- at least the recorded D1 signature policy.
+-- This prevents a security upgrade from silently trusting an older cache.
+CREATE TABLE IF NOT EXISTS media_verification (
+  md5                  TEXT PRIMARY KEY,
+  verification_version INTEGER NOT NULL,
+  verification_policy  TEXT NOT NULL DEFAULT 'compatible'
+    CHECK (verification_policy IN ('compatible', 'strict'))
+);
 
 -- Full-text search over entry bodies. Rebuilt on import; plain FTS5 with its own
 -- stored copy of `text` (not contentless) — the duplication costs some disk but

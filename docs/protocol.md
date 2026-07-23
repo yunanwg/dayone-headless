@@ -5,17 +5,16 @@
 
 This is the framing behind the REST ingester: a pure client that fetches
 ciphertext over Day One's sync API and decrypts it in our own code (no browser).
-It was captured by hooking `crypto.subtle.*` in the live web app and mapping its
-network — **algorithm shapes and endpoints only; no key/plaintext/token values
-were recorded** (byte-safe). Every claim here is re-proven byte-identical against
-the **JSON-export** mirror (the conformance oracle, see
-[architecture.md](architecture.md)) before it is trusted.
+It combines byte-safe protocol observation with Day One's published 2026
+[technical details](https://dayoneapp.com/wp-content/uploads/2026/03/encryption-and-day-one-sync_-technical-details-1.pdf).
+Decryption correctness is independently checked against the **JSON-export**
+mirror (the conformance oracle, see [architecture.md](architecture.md)).
 
 ## Key hierarchy (observed)
 
 ```
 passphrase (fixed, user-supplied)
-  └─ PBKDF2(salt=22B, iterations=10000, hash=SHA-256)  → AES-256-GCM key  K_pass
+  └─ PBKDF2(salt=account ID, iterations=100000, hash=SHA-256)  → AES-256-GCM key  K_pass
        └─ AES-256-GCM(IV=12B) decrypt  content_keys.encryptedPrivateKey
             → USER RSA private key  (PKCS8, ~1217B, RSA-OAEP, MGF hash=SHA-1)
                  └─ per journal, from vault_json.vault:
@@ -36,10 +35,11 @@ PBKDF2 ×1, `decrypt` AES-GCM ×25, `importKey` pkcs8 (RSA-OAEP/SHA-1) ×2,
 `decrypt` RSA-OAEP ×10, `importKey` raw (PBKDF2) ×11, `digest` SHA-512 ×1.
 
 ### Primitive parameters
-- **KDF**: PBKDF2, salt **22 bytes**, **10000** iterations, **SHA-256**, derives a
-  256-bit AES-GCM key.
+- **KDF**: PBKDF2, salt = UTF-8 account ID, **100000** iterations, **SHA-256**,
+  derives a 256-bit AES-GCM key.
 - **RSA**: RSA-OAEP, MGF/OAEP hash **SHA-1**, 2048-bit (256B ciphertext), private
-  key imported as **PKCS8**.
+  key imported as **PKCS8**. D1 locked-key signatures use
+  **RSASSA-PKCS1-v1_5/SHA-256** (`SHA256withRSA`).
 - **AEAD**: AES-256-GCM, **12-byte IV**. No `additionalData` was passed on the
   observed calls (AAD appears unused — must confirm). GCM tag is the trailing 16B.
 
@@ -95,19 +95,36 @@ There is **no key derivation** — the 32-byte vault key is used raw as the AES-
 Full layout (offsets from the start of the blob), implemented in `d1.ts`:
 
 ```
-"D1"(44 31)  0..2
-ver 0x01     2..3
-type         3..4
-[type != 0]  fingerprint 32B ‖ sigLen(uint16 BE) 2B ‖ signature(sigLen) ‖ lockedKey(RSA-wrapped) 256B
-iv           12B
-cipherText   (len - 16 - ivEnd) ... up to len-32
-gcmTag       len-32 .. len-16
-md5          len-16 .. len    ← MD5(bytes[0..len-16]); STRIP before AES-GCM
+"D1"(44 31)   0..2
+ver 0x01      2..3
+binaryFormat  3..4
+[format 1/2]  fingerprint 32B ‖ sigLen(uint16 BE) 2B ‖ signature(sigLen) ‖ lockedKey(RSA-wrapped) 256B
+iv            12B
+cipherText    (len - 16 - ivEnd) ... up to len-32
+gcmTag        len-32 .. len-16
+md5           len-16 .. len    ← MD5(bytes[0..len-16]); STRIP before AES-GCM
 ```
 
-- **type `01`** — PBKDF2/passphrase (user key, `content_keys.encryptedPrivateKey`; salt in payload).
-- **type `00`** — AES-256-GCM with the **raw** 32-byte vault key (no KDF); plaintext = the journal RSA private key as PKCS#8 PEM.
-- **type `02`** — RSA-hybrid: RSA-OAEP(SHA-1) unwrap the 256-byte `lockedKey` with the journal private key → 32-byte content key → AES-256-GCM the body. Plaintext may be gzip'd (magic `1f8b`, up to 3 passes).
+- **binary format `00`** — AES-256-GCM with an already-known raw 32-byte key;
+  used for journal names and encrypted private keys.
+- **binary format `01`** — RSA-hybrid binary content (attachments): fingerprint,
+  optional locked-key signature, and a 256-byte RSA-wrapped content key.
+- **binary format `02`** — RSA-hybrid gzipped JSON content (entries), with the
+  same locked-key fields as format 1.
+
+The parser accepts only crypto schema `0x01` and binary formats 0–2, validates
+every offset before slicing, requires the complete GCM tag, and verifies
+`md5(bytes[0..len-16])` before crypto. For formats 1/2 it retains the signature
+and the exact `lockedKey` bytes. Journal fingerprints are SHA-256 over the full
+DER public-key encoding. A present signature must verify as SHA256withRSA over
+`lockedKey` before RSA-OAEP unwrap. Format 2 requires exactly one gzip layer and
+the decompressed entry plaintext is capped.
+
+Signature length may be zero. Day One documents this for content produced with
+only the public journal key. Default compatible mode accepts and counts it;
+`DAYONE_REQUIRE_D1_SIGNATURES=1` rejects it to prevent signature stripping. Even
+strict D1 verification does not yet validate the vault's complete user-key
+`SignedUpdate` chain, so it must not be described as a complete server trust root.
 
 WebCrypto AES-GCM wants `cipherText ‖ gcmTag` as data + `iv` separate. AAD = none.
 An entry content blob = `<JSON revision header>` ‖ `\n` ‖ `<D1 type-02>` (`contentLength` = the D1 part).
@@ -136,6 +153,27 @@ endpoints seen on the login page are alternative methods, unused). No
 (`DAYONE_EMAIL`+`DAYONE_PASSWORD`) and retries once on 401 — so the whole client is
 browser-free and unattended. (`GET /api/users/key` returns the passphrase-wrapped
 user key `encryptedPrivateKey` for the full passphrase decrypt path.)
+
+All requests have a bounded timeout and endpoint-specific byte cap covering
+response consumption. Journals/feed records also have cardinality caps, and
+concurrent responses plus decrypt copies are constrained by weighted aggregate
+budgets. Encrypted attachment downloads are capped at 64 MiB.
+Retryable network/HTTP failures are retried only for
+idempotent GETs and only to a small configured budget
+(`DAYONE_HTTP_RETRIES`, default 2). Login POST is never automatically replayed.
+Malformed JSON or an incomplete entry cursor/revision shape rejects the whole
+feed. Recognized non-entry framing records are ignored but still consume the
+line budget. Public errors contain stable operation labels/statuses,
+not response bodies, identifiers, raw URLs, query strings, or underlying
+exception messages.
+
+The feed does not expose an authenticated terminal record or expected count.
+Consequently, absence is never interpreted as deletion: only
+`deletionRequested` is authoritative. Omitted stored entries are preserved and
+degrade the attempt, and an empty first feed cannot mark the mirror complete. A
+non-empty prefix during the first-ever sync is not locally distinguishable from
+a complete response; the official JSON-export comparison is the independent
+completeness oracle.
 
 ## Master key → user private key (RESOLVED — the pure-passphrase path)
 

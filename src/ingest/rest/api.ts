@@ -1,15 +1,8 @@
 /**
- * REST client — pure `fetch`, no browser. Talks to Day One's sync API with
- * a 32-char bearer token. Ciphertext in; decryption is crypto.ts + d1.ts.
+ * REST client for Day One's private sync API.
  *
- * Auth: every request needs `authorization: <token>` plus `x-user-agent` and
- * `device-info` (a cookie alone → 403). The token is minted by a plain
- * `POST /api/v3/users/login {email,password}` — no OAuth, no browser — so the
- * client can self-authenticate from env and auto-renew on 401.
- *
- * Env: DAYONE_API_TOKEN (or DAYONE_EMAIL + DAYONE_PASSWORD), DAYONE_X_USER_AGENT,
- * DAYONE_DEVICE_INFO, DAYONE_HTTP_TIMEOUT_MS. Secrets are read from env or their
- * `_FILE` companion and never logged.
+ * Every outbound operation is time-bounded. Only idempotent GETs receive a
+ * finite retry budget; login POSTs are never automatically replayed.
  */
 
 import { ApiError, AuthError, ConfigError } from "../../errors.ts";
@@ -20,133 +13,95 @@ export interface Credentials {
   password: string;
 }
 
+export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
+export const DEFAULT_GET_RETRIES = 2;
+export const DEFAULT_INFLIGHT_RESPONSE_BYTES = 256 * 1024 * 1024;
+export const MAX_JOURNALS = 1_024;
+export const MAX_ENTRY_FEED_ITEMS = 25_000;
+export const ENDPOINT_BODY_LIMITS = {
+  login: 64 * 1024,
+  userKey: 1 * 1024 * 1024,
+  journals: 4 * 1024 * 1024,
+  entryFeed: 32 * 1024 * 1024,
+  entryContent: 4 * 1024 * 1024,
+  attachment: 64 * 1024 * 1024,
+} as const;
+export const MAX_JOURNALS_PER_SYNC = MAX_JOURNALS;
+export const MAX_FEED_ITEMS_PER_JOURNAL = MAX_ENTRY_FEED_ITEMS;
+export const UPSTREAM_RESPONSE_LIMITS = {
+  login: ENDPOINT_BODY_LIMITS.login,
+  journalManifest: ENDPOINT_BODY_LIMITS.journals,
+  entriesFeed: ENDPOINT_BODY_LIMITS.entryFeed,
+  entry: ENDPOINT_BODY_LIMITS.entryContent,
+  attachment: ENDPOINT_BODY_LIMITS.attachment,
+  userKey: ENDPOINT_BODY_LIMITS.userKey,
+} as const;
+const MAX_HTTP_TIMEOUT_MS = 300_000;
+const MAX_GET_RETRIES = 5;
+const DEFAULT_RETRY_BASE_DELAY_MS = 250;
+const RETRYABLE_GET_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 export interface DayOneApiConfig {
-  /** A current bearer token; optional if `credentials` are given (then it's minted). */
   token?: string;
   xUserAgent: string;
   deviceInfo: string;
-  /** If present, the client mints/renews the token itself (headless). */
   credentials?: Credentials;
   baseUrl?: string;
+  timeoutMs?: number;
+  /** Compatibility alias for callers introduced by the deployment hardening. */
   requestTimeoutMs?: number;
+  getRetries?: number;
+  retryBaseDelayMs?: number;
+  /** Aggregate raw response budget; test/deployment seam, default 256 MiB. */
+  maxInflightResponseBytes?: number;
+  /** Synthetic test seam; production uses global fetch. */
+  fetchImpl?: FetchLike;
 }
 
-/** A plausible web-client user-agent; overridable via DAYONE_X_USER_AGENT. */
+export interface LoginOptions {
+  baseUrl?: string;
+  xUserAgent?: string;
+  deviceInfo?: string;
+  timeoutMs?: number;
+  fetchImpl?: FetchLike;
+}
+
 const DEFAULT_X_USER_AGENT = "DayOneWeb/2026.15 (en-US; dayone-headless; Server; Release/1; Core/1.0.0)";
-export const DEFAULT_HTTP_TIMEOUT_MS = 60_000;
-const MIN_HTTP_TIMEOUT_MS = 1_000;
-const MAX_HTTP_TIMEOUT_MS = 300_000;
-const KIB = 1024;
-const MIB = 1024 * KIB;
-
-/**
- * Hard decoded-body limits for upstream responses. Timeouts and worker pools
- * bound duration/concurrency; these caps separately bound aggregation memory
- * even when an upstream responds very quickly or lies about Content-Length.
- */
-export const UPSTREAM_RESPONSE_LIMITS = {
-  login: 64 * KIB,
-  journalManifest: 4 * MIB,
-  entriesFeed: 32 * MIB,
-  entry: 4 * MIB,
-  attachment: 64 * MIB,
-  userKey: 4 * MIB,
-} as const;
-export const MAX_JOURNALS_PER_SYNC = 1_024;
-export const MAX_FEED_ITEMS_PER_JOURNAL = 25_000;
-
-export class UpstreamResponseLimitError extends ApiError {
-  override name = "UpstreamResponseLimitError";
-
-  constructor(kind: keyof typeof UPSTREAM_RESPONSE_LIMITS, maximumBytes: number) {
-    super(`upstream ${kind} response exceeded the ${maximumBytes}-byte safety limit`);
-  }
-}
-
-/**
- * Consume a response stream with an exact decoded-byte ceiling. Never call
- * text(), json(), or arrayBuffer() first: those APIs aggregate without a cap.
- */
-export async function readUpstreamBytes(
-  response: Response,
-  kind: keyof typeof UPSTREAM_RESPONSE_LIMITS,
-): Promise<Uint8Array> {
-  const maximumBytes = UPSTREAM_RESPONSE_LIMITS[kind];
-  const declaredLength = declaredResponseLength(response);
-  if (declaredLength !== null && declaredLength > maximumBytes) {
-    await response.body?.cancel().catch(() => {});
-    throw new UpstreamResponseLimitError(kind, maximumBytes);
-  }
-
-  if (!response.body) return new Uint8Array();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maximumBytes) {
-        await reader.cancel().catch(() => {});
-        throw new UpstreamResponseLimitError(kind, maximumBytes);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-
-async function readUpstreamText(
-  response: Response,
-  kind: keyof typeof UPSTREAM_RESPONSE_LIMITS,
-): Promise<string> {
-  return new TextDecoder().decode(await readUpstreamBytes(response, kind));
-}
-
-async function readUpstreamJson<T>(
-  response: Response,
-  kind: keyof typeof UPSTREAM_RESPONSE_LIMITS,
-): Promise<T> {
-  return JSON.parse(await readUpstreamText(response, kind)) as T;
-}
-
-function declaredResponseLength(response: Response): number | null {
-  const value = response.headers.get("content-length");
-  return value && /^\d+$/.test(value) ? Number(value) : null;
-}
 
 const randomHex = (n: number): string =>
-  [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  [...crypto.getRandomValues(new Uint8Array(n))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-/** Build the `device-info` header. `Id` is the client-generated device identity;
- * pin it via DAYONE_DEVICE_ID so repeat runs are the SAME device (not a new one). */
 export function buildDeviceInfo(id: string): string {
   return `Id="${id}"; Model="dayone-headless"; Name="dayone-headless"; Language="en-US"; Country="US"; app_id="com.bloombuilt.dayone-web"`;
 }
 
-/**
- * Self-contained config from env — a real deployment only needs credentials:
- *   DAYONE_ENCRYPTION_KEY (for decryption, read elsewhere) + auth below.
- * Auth: DAYONE_API_TOKEN, or DAYONE_EMAIL + DAYONE_PASSWORD (self-minted).
- * Optional: DAYONE_DEVICE_ID (pin the device), DAYONE_X_USER_AGENT/DEVICE_INFO.
- */
-function httpTimeoutFromEnv(value: string | undefined): number {
-  if (value === undefined) return DEFAULT_HTTP_TIMEOUT_MS;
+function boundedEnvInteger(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+  name: string,
+): number {
+  if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < MIN_HTTP_TIMEOUT_MS || parsed > MAX_HTTP_TIMEOUT_MS) {
-    throw new ConfigError(
-      `DAYONE_HTTP_TIMEOUT_MS must be an integer from ${MIN_HTTP_TIMEOUT_MS} to ${MAX_HTTP_TIMEOUT_MS}`,
-    );
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new ConfigError(`${name} must be an integer from ${min} to ${max}`);
+  }
+  return parsed;
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+  name: string,
+): number {
+  const parsed = value ?? fallback;
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new ConfigError(`${name} must be an integer from ${min} to ${max}`);
   }
   return parsed;
 }
@@ -160,83 +115,287 @@ export function apiConfigFromEnv(env: NodeJS.ProcessEnv = process.env): DayOneAp
   }
   const xUserAgent = env.DAYONE_X_USER_AGENT || DEFAULT_X_USER_AGENT;
   const deviceInfo = env.DAYONE_DEVICE_INFO || buildDeviceInfo(env.DAYONE_DEVICE_ID || randomHex(16));
+  const timeoutMs = boundedEnvInteger(
+    env.DAYONE_HTTP_TIMEOUT_MS,
+    DEFAULT_HTTP_TIMEOUT_MS,
+    1_000,
+    MAX_HTTP_TIMEOUT_MS,
+    "DAYONE_HTTP_TIMEOUT_MS",
+  );
   return {
     token,
     xUserAgent,
     deviceInfo,
     credentials: email && password ? { email, password } : undefined,
-    requestTimeoutMs: httpTimeoutFromEnv(env.DAYONE_HTTP_TIMEOUT_MS),
+    timeoutMs,
+    requestTimeoutMs: timeoutMs,
+    getRetries: boundedEnvInteger(
+      env.DAYONE_HTTP_RETRIES,
+      DEFAULT_GET_RETRIES,
+      0,
+      MAX_GET_RETRIES,
+      "DAYONE_HTTP_RETRIES",
+    ),
   };
 }
 
-/**
- * Mint a fresh 32-char API token from email + password.
- * `POST /api/v3/users/login {email,password}` → `{token, user, …}`. No 2FA on the
- * password path; renewal is just calling this again.
- */
-export async function login(
-  creds: Credentials,
-  opts: {
-    baseUrl?: string;
-    xUserAgent?: string;
-    deviceInfo?: string;
-    requestTimeoutMs?: number;
-  } = {},
-): Promise<string> {
-  const r = await fetch(`${opts.baseUrl ?? "https://dayone.me"}/api/v3/users/login`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(opts.xUserAgent ? { "x-user-agent": opts.xUserAgent } : {}),
-      ...(opts.deviceInfo ? { "device-info": opts.deviceInfo } : {}),
-    },
-    body: JSON.stringify({ email: creds.email, password: creds.password }),
-    signal: AbortSignal.timeout(opts.requestTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS),
+class TransportFailure extends Error {
+  constructor(readonly timedOut: boolean) {
+    super(timedOut ? "timeout" : "network");
+  }
+}
+
+export class UpstreamResponseLimitError extends Error {
+  override name = "UpstreamResponseLimitError";
+}
+
+/** FIFO weighted semaphore used to bound aggregate concurrent response bodies. */
+export class ByteBudget {
+  private available: number;
+  private readonly waiters: {
+    weight: number;
+    resolve: (release: () => void) => void;
+  }[] = [];
+
+  constructor(readonly capacity: number) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1) {
+      throw new ConfigError("byte budget capacity must be a positive safe integer");
+    }
+    this.available = capacity;
+  }
+
+  async acquire(requestedWeight: number): Promise<() => void> {
+    const weight = Math.min(this.capacity, Math.max(1, Math.ceil(requestedWeight)));
+    if (this.waiters.length === 0 && weight <= this.available) {
+      this.available -= weight;
+      return this.releaseFor(weight);
+    }
+    return new Promise((resolve) => {
+      this.waiters.push({ weight, resolve });
+      this.drain();
+    });
+  }
+
+  private releaseFor(weight: number): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.available += weight;
+      this.drain();
+    };
+  }
+
+  private drain(): void {
+    while (this.waiters[0] && this.waiters[0].weight <= this.available) {
+      const waiter = this.waiters.shift()!;
+      this.available -= waiter.weight;
+      waiter.resolve(this.releaseFor(waiter.weight));
+    }
+  }
+}
+
+function deadline(timeoutMs: number): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+}
+
+async function beforeDeadline<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new TransportFailure(true);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new TransportFailure(true));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
-  if (!r.ok) throw new AuthError(`login failed: ${r.status} — check DAYONE_EMAIL / DAYONE_PASSWORD`);
-  const j = await readUpstreamJson<{ token?: string }>(r, "login");
-  if (!j.token) throw new AuthError("login response had no token");
-  return j.token;
+}
+
+async function discardResponseBody(response: Response): Promise<void> {
+  try {
+    void response.body?.cancel().catch(() => {});
+  } catch {
+    // Transport cleanup must never replace the stable public request error.
+  }
+}
+
+async function readResponseBytes(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const contentLength = response.headers?.get("content-length");
+  if (contentLength !== null && contentLength !== undefined) {
+    if (!/^\d+$/.test(contentLength) || Number(contentLength) > maxBytes) {
+      await discardResponseBody(response);
+      throw new UpstreamResponseLimitError();
+    }
+  }
+  if (!response.body) return new Uint8Array();
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (total + value.byteLength > maxBytes) {
+        void reader.cancel().catch(() => {});
+        throw new UpstreamResponseLimitError();
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function readResponseText(response: Response, maxBytes: number): Promise<string> {
+  return new TextDecoder("utf-8", { fatal: true }).decode(await readResponseBytes(response, maxBytes));
+}
+
+async function readResponseJson<T>(response: Response, maxBytes: number): Promise<T> {
+  return JSON.parse(await readResponseText(response, maxBytes)) as T;
+}
+
+export function readUpstreamBytes(
+  response: Response,
+  kind: keyof typeof UPSTREAM_RESPONSE_LIMITS,
+): Promise<Uint8Array> {
+  return readResponseBytes(response, UPSTREAM_RESPONSE_LIMITS[kind]);
+}
+
+/** Login is deliberately single-attempt: a timed-out POST is never blindly replayed. */
+export async function login(creds: Credentials, opts: LoginOptions = {}): Promise<string> {
+  const timeoutMs = boundedInteger(
+    opts.timeoutMs,
+    DEFAULT_HTTP_TIMEOUT_MS,
+    1,
+    MAX_HTTP_TIMEOUT_MS,
+    "login timeout",
+  );
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const requestDeadline = deadline(timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await beforeDeadline(
+        fetchImpl(`${opts.baseUrl ?? "https://dayone.me"}/api/v3/users/login`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(opts.xUserAgent ? { "x-user-agent": opts.xUserAgent } : {}),
+            ...(opts.deviceInfo ? { "device-info": opts.deviceInfo } : {}),
+          },
+          body: JSON.stringify({ email: creds.email, password: creds.password }),
+          signal: requestDeadline.signal,
+        }),
+        requestDeadline.signal,
+      );
+    } catch {
+      throw new AuthError(
+        requestDeadline.signal.aborted ? "login request timed out" : "login request failed",
+      );
+    }
+    if (!response.ok) {
+      await discardResponseBody(response);
+      throw new AuthError(`login failed (HTTP ${response.status}) — check DAYONE_EMAIL / DAYONE_PASSWORD`);
+    }
+    let json: unknown;
+    try {
+      json = await beforeDeadline(
+        readResponseJson<unknown>(response, ENDPOINT_BODY_LIMITS.login),
+        requestDeadline.signal,
+      );
+    } catch {
+      throw new AuthError(
+        requestDeadline.signal.aborted ? "login request timed out" : "login response was invalid",
+      );
+    }
+    if (!isRecord(json) || typeof json.token !== "string" || json.token.length === 0) {
+      throw new AuthError("login response had no token");
+    }
+    return json.token;
+  } finally {
+    requestDeadline.clear();
+  }
 }
 
 export interface FeedItem {
   cursor: number;
   revision: {
-    entryId: string; // 32-hex — the JSON-export uuid
+    entryId: string;
     journalId: string;
-    revisionId: number; // bumps on every edit — the incremental-sync key
+    revisionId: number;
     editDate: number;
     saveDate: number;
     moments: unknown[];
     deletionRequested: number | null;
-    [k: string]: unknown;
+    [key: string]: unknown;
   };
   contentLength: number;
   encrypted: boolean;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validatedFeedItem(value: unknown, expectedJournalId: string): FeedItem {
+  if (!isRecord(value) || !Number.isSafeInteger(value.cursor) || (value.cursor as number) < 0) {
+    throw new ApiError("Day One entry feed response was invalid");
+  }
+  const revision = value.revision;
+  if (
+    !isRecord(revision) ||
+    typeof revision.entryId !== "string" ||
+    revision.entryId.length === 0 ||
+    typeof revision.journalId !== "string" ||
+    revision.journalId !== expectedJournalId ||
+    typeof revision.revisionId !== "number" ||
+    !Number.isFinite(revision.revisionId) ||
+    typeof revision.editDate !== "number" ||
+    !Number.isFinite(revision.editDate) ||
+    typeof revision.saveDate !== "number" ||
+    !Number.isFinite(revision.saveDate) ||
+    !Array.isArray(revision.moments) ||
+    (revision.deletionRequested !== null &&
+      (typeof revision.deletionRequested !== "number" || !Number.isFinite(revision.deletionRequested))) ||
+    !Number.isSafeInteger(value.contentLength) ||
+    (value.contentLength as number) < 0 ||
+    typeof value.encrypted !== "boolean"
+  ) {
+    throw new ApiError("Day One entry feed response was invalid");
+  }
+  return value as unknown as FeedItem;
+}
+
 function decodeLine(chunks: readonly Uint8Array[], byteLength: number): string {
   if (chunks.length === 0) return "";
-  if (chunks.length === 1) return new TextDecoder().decode(chunks[0]);
+  if (chunks.length === 1) return new TextDecoder("utf-8", { fatal: true }).decode(chunks[0]);
   const line = new Uint8Array(byteLength);
   let offset = 0;
   for (const chunk of chunks) {
     line.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(line);
+  return new TextDecoder("utf-8", { fatal: true }).decode(line);
 }
 
 /**
- * Parse the entries feed in one streaming pass. Every non-empty line consumes
- * the item budget before JSON parsing, including protocol framing records.
+ * Parse the feed in one bounded streaming pass. Every non-empty protocol line
+ * consumes the cardinality budget before JSON parsing or result allocation.
  */
-export async function readEntriesFeed(response: Response): Promise<FeedItem[]> {
-  const maximumBytes = UPSTREAM_RESPONSE_LIMITS.entriesFeed;
-  const declaredLength = declaredResponseLength(response);
-  if (declaredLength !== null && declaredLength > maximumBytes) {
-    await response.body?.cancel().catch(() => {});
-    throw new UpstreamResponseLimitError("entriesFeed", maximumBytes);
+export async function readEntriesFeed(response: Response, expectedJournalId?: string): Promise<FeedItem[]> {
+  const maximumBytes = ENDPOINT_BODY_LIMITS.entryFeed;
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > maximumBytes)) {
+    await discardResponseBody(response);
+    throw new UpstreamResponseLimitError();
   }
   if (!response.body) return [];
 
@@ -252,22 +411,28 @@ export async function readEntriesFeed(response: Response): Promise<FeedItem[]> {
     lineChunks = [];
     lineBytes = 0;
     if (!line) return;
-
     lineCount++;
-    if (lineCount > MAX_FEED_ITEMS_PER_JOURNAL) {
-      throw new ApiError(
-        `upstream entries feed exceeded the ${MAX_FEED_ITEMS_PER_JOURNAL}-item safety limit`,
-      );
+    if (lineCount > MAX_ENTRY_FEED_ITEMS) {
+      throw new ApiError(`upstream entries feed exceeded the ${MAX_ENTRY_FEED_ITEMS}-item safety limit`);
     }
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
-      throw new ApiError("upstream entries feed contained malformed JSON");
+      throw new ApiError(
+        expectedJournalId === undefined
+          ? "upstream entries feed contained malformed JSON"
+          : "Day One entry feed response was invalid",
+      );
     }
-    const candidate = parsed as Partial<FeedItem> | null;
-    if (candidate?.revision?.entryId) items.push(candidate as FeedItem);
+    if (!isRecord(parsed) || !("revision" in parsed)) return;
+    if (expectedJournalId === undefined) {
+      const candidate = parsed as Partial<FeedItem>;
+      if (candidate.revision?.entryId) items.push(candidate as FeedItem);
+      return;
+    }
+    items.push(validatedFeedItem(parsed, expectedJournalId));
   };
 
   try {
@@ -275,9 +440,7 @@ export async function readEntriesFeed(response: Response): Promise<FeedItem[]> {
       const { done, value } = await reader.read();
       if (done) break;
       totalBytes += value.byteLength;
-      if (totalBytes > maximumBytes) {
-        throw new UpstreamResponseLimitError("entriesFeed", maximumBytes);
-      }
+      if (totalBytes > maximumBytes) throw new UpstreamResponseLimitError();
 
       let start = 0;
       while (start < value.byteLength) {
@@ -303,99 +466,201 @@ export async function readEntriesFeed(response: Response): Promise<FeedItem[]> {
   return items;
 }
 
+type GetAttempt<T> = { kind: "ok"; value: T } | { kind: "status"; status: number };
+
 export class DayOneApi {
-  constructor(private cfg: DayOneApiConfig) {}
+  private readonly timeoutMs: number;
+  private readonly getRetries: number;
+  private readonly retryBaseDelayMs: number;
+  private readonly fetchImpl: FetchLike;
+  private readonly responseBudget: ByteBudget;
+
+  constructor(private cfg: DayOneApiConfig) {
+    this.timeoutMs = boundedInteger(
+      cfg.timeoutMs ?? cfg.requestTimeoutMs,
+      DEFAULT_HTTP_TIMEOUT_MS,
+      1,
+      MAX_HTTP_TIMEOUT_MS,
+      "HTTP timeout",
+    );
+    this.getRetries = boundedInteger(cfg.getRetries, DEFAULT_GET_RETRIES, 0, MAX_GET_RETRIES, "GET retries");
+    this.retryBaseDelayMs = boundedInteger(
+      cfg.retryBaseDelayMs,
+      DEFAULT_RETRY_BASE_DELAY_MS,
+      0,
+      30_000,
+      "retry base delay",
+    );
+    this.fetchImpl = cfg.fetchImpl ?? globalThis.fetch;
+    this.responseBudget = new ByteBudget(
+      boundedInteger(
+        cfg.maxInflightResponseBytes,
+        DEFAULT_INFLIGHT_RESPONSE_BYTES,
+        1,
+        Number.MAX_SAFE_INTEGER,
+        "in-flight response byte budget",
+      ),
+    );
+  }
 
   private headers(): Record<string, string> {
-    if (!this.cfg.token) throw new Error("no token (call ensureToken first)");
+    if (!this.cfg.token) throw new AuthError("no API token available");
     return {
       authorization: this.cfg.token,
       "x-user-agent": this.cfg.xUserAgent,
       "device-info": this.cfg.deviceInfo,
     };
   }
+
   private url(path: string): string {
     return `${this.cfg.baseUrl ?? "https://dayone.me"}${path}`;
   }
-  private async fetchPath(path: string): Promise<Response> {
-    try {
-      return await fetch(this.url(path), {
-        headers: this.headers(),
-        signal: AbortSignal.timeout(this.cfg.requestTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS),
-      });
-    } catch {
-      throw new ApiError("upstream request failed");
-    }
-  }
 
-  /** Mint a token from credentials if we don't have one yet. */
   async ensureToken(): Promise<void> {
     if (!this.cfg.token) this.cfg.token = await this.renew();
   }
+
   private renew(): Promise<string> {
-    if (!this.cfg.credentials)
+    if (!this.cfg.credentials) {
       throw new AuthError("token expired and no DAYONE_EMAIL/PASSWORD (or DAYONE_API_TOKEN) to renew");
+    }
     return login(this.cfg.credentials, {
       baseUrl: this.cfg.baseUrl,
       xUserAgent: this.cfg.xUserAgent,
       deviceInfo: this.cfg.deviceInfo,
-      requestTimeoutMs: this.cfg.requestTimeoutMs,
+      timeoutMs: this.timeoutMs,
+      fetchImpl: this.fetchImpl,
     });
   }
 
-  /** Fetch with one automatic token-renewal + retry on 401 (if credentials are set). */
-  private async req(path: string): Promise<Response> {
+  private async getAttempt<T>(
+    path: string,
+    label: string,
+    consume: (response: Response) => Promise<T>,
+  ): Promise<GetAttempt<T>> {
+    const requestDeadline = deadline(this.timeoutMs);
+    try {
+      let response: Response;
+      try {
+        response = await beforeDeadline(
+          this.fetchImpl(this.url(path), {
+            method: "GET",
+            headers: this.headers(),
+            signal: requestDeadline.signal,
+          }),
+          requestDeadline.signal,
+        );
+      } catch {
+        throw new TransportFailure(requestDeadline.signal.aborted);
+      }
+      if (response.status === 401 || RETRYABLE_GET_STATUSES.has(response.status)) {
+        await discardResponseBody(response);
+        return { kind: "status", status: response.status };
+      }
+      if (!response.ok) {
+        await discardResponseBody(response);
+        throw new ApiError(`Day One ${label} request failed (HTTP ${response.status})`, response.status);
+      }
+      try {
+        return {
+          kind: "ok",
+          value: await beforeDeadline(consume(response), requestDeadline.signal),
+        };
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        if (requestDeadline.signal.aborted) throw new TransportFailure(true);
+        throw new ApiError(`Day One ${label} response was invalid`);
+      }
+    } finally {
+      requestDeadline.clear();
+    }
+  }
+
+  private async req<T>(
+    path: string,
+    label: string,
+    maxResponseBytes: number,
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
     await this.ensureToken();
-    let res = await this.fetchPath(path);
-    if (res.status === 401 && this.cfg.credentials) {
-      this.cfg.token = await this.renew();
-      res = await this.fetchPath(path);
+    const releaseBudget = await this.responseBudget.acquire(maxResponseBytes);
+    let retries = 0;
+    let renewed = false;
+    try {
+      while (true) {
+        let attempt: GetAttempt<T>;
+        try {
+          attempt = await this.getAttempt(path, label, consume);
+        } catch (error) {
+          if (!(error instanceof TransportFailure)) throw error;
+          if (retries < this.getRetries) {
+            await Bun.sleep(this.retryBaseDelayMs * 2 ** retries);
+            retries++;
+            continue;
+          }
+          throw new ApiError(
+            error.timedOut ? `Day One ${label} request timed out` : `Day One ${label} request failed`,
+          );
+        }
+        if (attempt.kind === "ok") return attempt.value;
+        if (attempt.status === 401 && this.cfg.credentials && !renewed) {
+          this.cfg.token = await this.renew();
+          renewed = true;
+          retries = 0;
+          continue;
+        }
+        if (RETRYABLE_GET_STATUSES.has(attempt.status) && retries < this.getRetries) {
+          await Bun.sleep(this.retryBaseDelayMs * 2 ** retries);
+          retries++;
+          continue;
+        }
+        throw new ApiError(`Day One ${label} request failed (HTTP ${attempt.status})`, attempt.status);
+      }
+    } finally {
+      releaseBudget();
     }
-    return res;
   }
 
-  async getJournals(): Promise<any[]> {
-    const r = await this.req("/api/v6/sync/journals");
-    if (!r.ok) throw new ApiError(`GET /api/v6/sync/journals → ${r.status}`, r.status);
-    const journals = await readUpstreamJson<any[]>(r, "journalManifest");
-    if (!Array.isArray(journals) || journals.length > MAX_JOURNALS_PER_SYNC) {
-      throw new ApiError(
-        `upstream journal manifest exceeded the ${MAX_JOURNALS_PER_SYNC}-journal safety limit`,
-      );
-    }
-    return journals;
+  getJournals(): Promise<any[]> {
+    return this.req("/api/v6/sync/journals", "journals", ENDPOINT_BODY_LIMITS.journals, async (response) => {
+      const journals = await readResponseJson<unknown>(response, ENDPOINT_BODY_LIMITS.journals);
+      if (!Array.isArray(journals) || journals.length > MAX_JOURNALS) {
+        throw new ApiError("Day One journals response was invalid");
+      }
+      return journals;
+    });
   }
 
-  /** Entries feed (NDJSON-ish: one JSON object per line; some lines may be framing). */
-  async getEntriesFeed(journalId: string): Promise<FeedItem[]> {
-    const r = await this.req(`/api/v2/sync/entries/${journalId}/feed`);
-    if (!r.ok) throw new ApiError(`GET entries feed → ${r.status}`, r.status);
-    return readEntriesFeed(r);
+  getEntriesFeed(journalId: string): Promise<FeedItem[]> {
+    return this.req(
+      `/api/v2/sync/entries/${journalId}/feed`,
+      "GET entries feed",
+      ENDPOINT_BODY_LIMITS.entryFeed,
+      (response) => readEntriesFeed(response, journalId),
+    );
   }
 
-  /** Per-entry encrypted blob: `<JSON header>` ‖ `\n` ‖ D1 ciphertext. */
-  async getEntryContent(journalId: string, entryId: string): Promise<Uint8Array> {
-    const r = await this.req(`/api/v2/sync/entries/${journalId}/${entryId}`);
-    if (!r.ok) throw new ApiError(`GET entry content → ${r.status}`, r.status);
-    return readUpstreamBytes(r, "entry");
+  getEntryContent(journalId: string, entryId: string): Promise<Uint8Array> {
+    return this.req(
+      `/api/v2/sync/entries/${journalId}/${entryId}`,
+      "entry content",
+      ENDPOINT_BODY_LIMITS.entryContent,
+      (response) => readResponseBytes(response, ENDPOINT_BODY_LIMITS.entryContent),
+    );
   }
 
-  /**
-   * Download one attachment's ENCRYPTED blob. The endpoint 307-redirects to the
-   * ciphertext on S3 (`vnd/day-one-encrypted`); `fetch` follows the redirect. The
-   * bytes are a D1 envelope — decrypt with `decryptAttachment` (media.ts).
-   * `attachmentId` is the moment/media `identifier`.
-   */
-  async getAttachment(journalId: string, attachmentId: string): Promise<Uint8Array> {
-    const r = await this.req(`/api/journals/${journalId}/attachments/${attachmentId}/download`);
-    if (!r.ok) throw new ApiError(`GET attachment → ${r.status}`, r.status);
-    return readUpstreamBytes(r, "attachment");
+  getAttachment(journalId: string, attachmentId: string): Promise<Uint8Array> {
+    return this.req(
+      `/api/journals/${journalId}/attachments/${attachmentId}/download`,
+      "attachment",
+      ENDPOINT_BODY_LIMITS.attachment,
+      (response) => readResponseBytes(response, ENDPOINT_BODY_LIMITS.attachment),
+    );
   }
 
-  /** The passphrase-wrapped user key material (for the full passphrase decrypt path). */
-  async getUserKey(): Promise<{ publicKey: string; encryptedPrivateKey: string; fingerprint: string }> {
-    const r = await this.req("/api/users/key");
-    if (!r.ok) throw new ApiError(`GET /api/users/key → ${r.status}`, r.status);
-    return readUpstreamJson(r, "userKey");
+  getUserKey(): Promise<{ publicKey: string; encryptedPrivateKey: string; fingerprint: string }> {
+    return this.req("/api/users/key", "user key", ENDPOINT_BODY_LIMITS.userKey, (response) =>
+      readResponseJson(response, ENDPOINT_BODY_LIMITS.userKey),
+    );
   }
 }

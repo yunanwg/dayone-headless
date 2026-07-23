@@ -103,6 +103,17 @@ test("fetchChangedEntries: an entry whose key is unavailable counts as incomplet
   expect(failed).toBe(1);
 });
 
+test("fetchChangedEntries: decrypted content cannot claim a different feed identity", async () => {
+  const { mapped, done, failed } = await fetchChangedEntries(
+    [ref("FEED-ENTRY")],
+    async () => syntheticContent("DECRYPTED-OTHER-ENTRY"),
+    1,
+  );
+  expect(mapped).toEqual([]);
+  expect(done).toEqual([]);
+  expect(failed).toBe(1);
+});
+
 test("fetchChangedEntries: concurrency 1 behaves like the old sequential path", async () => {
   const order: string[] = [];
   const refs = [ref("1"), ref("2"), ref("3")];

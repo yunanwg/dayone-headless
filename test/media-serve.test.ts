@@ -13,6 +13,7 @@ import { prepareMediaPath } from "../src/media-cache.ts";
 import { openMirror } from "../src/serve/db/open.ts";
 import { resolveMedia } from "../src/serve/queries.ts";
 import type { DayOneExport } from "../src/types.ts";
+import { MEDIA_CACHE_VERIFICATION_VERSION } from "../src/verification.ts";
 
 // One entry with one photo (identifier PHOTO-1, md5 "cafebabecafebabecafebabecafebabe").
 const fixture = {
@@ -54,9 +55,27 @@ test("resolveMedia reports not-cached when bytes are absent", () => {
   expect(m!.path).toBeNull();
 });
 
-test("resolveMedia reports cached + path once bytes exist", async () => {
+test("resolveMedia hides a legacy cache file until its current verification generation is recorded", async () => {
   await Bun.write(prepareMediaPath("cafebabecafebabecafebabecafebabe", cacheDir), new Uint8Array([1, 2, 3]));
+  expect(resolveMedia(db, "PHOTO-1", cacheDir)).toMatchObject({
+    cached: false,
+    path: null,
+  });
+  db.query(`INSERT INTO media_verification (md5, verification_version) VALUES (?1, ?2)`).run(
+    "cafebabecafebabecafebabecafebabe",
+    MEDIA_CACHE_VERIFICATION_VERSION,
+  );
   const m = resolveMedia(db, "PHOTO-1", cacheDir);
   expect(m!.cached).toBe(true);
   expect(m!.path).toBe(join(cacheDir, "cafebabecafebabecafebabecafebabe"));
+
+  db.query(
+    `INSERT INTO meta (key, value) VALUES ('media_verification_required_policy', 'strict')
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run();
+  expect(resolveMedia(db, "PHOTO-1", cacheDir)).toMatchObject({ cached: false, path: null });
+  db.query(`UPDATE media_verification SET verification_policy = 'strict' WHERE md5 = ?`).run(
+    "cafebabecafebabecafebabecafebabe",
+  );
+  expect(resolveMedia(db, "PHOTO-1", cacheDir)).toMatchObject({ cached: true });
 });
