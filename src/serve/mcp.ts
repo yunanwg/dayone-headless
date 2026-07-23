@@ -14,10 +14,10 @@
 import { existsSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
-import { checkHttpGate, httpGateConfigFromEnv } from "./http-auth.ts";
+import { httpGateConfigFromEnv } from "./http-auth.ts";
+import { handleStatelessMcpHttpRequest, MCP_HTTP_MAX_REQUEST_BODY_BYTES } from "./mcp-http.ts";
 import {
   MEDIA_IDENTIFIER_MAX_CHARS,
   mediaNotFoundResult,
@@ -438,64 +438,21 @@ function buildServer(): McpServer {
 const port = process.env.DAYONE_MCP_PORT;
 
 if (port) {
-  // Stateful streamable-HTTP: one transport+server per session, routed by the
-  // mcp-session-id header. A single shared transport must NOT be reused across
-  // requests — the SDK collides message ids and the handshake fails. We create a
-  // fresh transport only on `initialize`, register it on session init, and drop
-  // it on close; any other session-less request is rejected cleanly.
-  const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
-  const isInit = (body: unknown): boolean =>
-    Array.isArray(body)
-      ? body.some((m) => (m as { method?: string })?.method === "initialize")
-      : (body as { method?: string })?.method === "initialize";
-
   // Defense-in-depth: optional bearer-token auth + origin allowlist (see http-auth.ts).
   const gate = httpGateConfigFromEnv();
 
   Bun.serve({
     port: Number(port),
+    maxRequestBodySize: MCP_HTTP_MAX_REQUEST_BODY_BYTES,
     // Default to loopback; the proxy/tunnel in front handles remote exposure. In
     // Docker the published-port bind needs 0.0.0.0 — compose sets DAYONE_MCP_HOST.
     hostname: process.env.DAYONE_MCP_HOST ?? "127.0.0.1",
-    fetch: async (req) => {
-      const gated = checkHttpGate(req, gate);
-      if (gated) return gated;
-
-      const sid = req.headers.get("mcp-session-id");
-      const existing = sid ? transports.get(sid) : undefined;
-      if (existing) return existing.handleRequest(req);
-
-      if (req.method === "POST") {
-        const body = await req.json().catch(() => null);
-        if (isInit(body)) {
-          const transport: WebStandardStreamableHTTPServerTransport =
-            new WebStandardStreamableHTTPServerTransport({
-              sessionIdGenerator: () => crypto.randomUUID(),
-              onsessioninitialized: (id) => {
-                transports.set(id, transport);
-              },
-              onsessionclosed: (id) => {
-                transports.delete(id);
-              },
-            });
-          transport.onclose = () => {
-            if (transport.sessionId) transports.delete(transport.sessionId);
-          };
-          await buildServer().connect(transport);
-          return transport.handleRequest(req, { parsedBody: body });
-        }
-      }
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "No valid session id" },
-          id: null,
-        }),
-        { status: 400, headers: { "content-type": "application/json" } },
-      );
-    },
+    fetch: (req) => handleStatelessMcpHttpRequest(req, { gate, buildServer }),
   });
-  console.error(`dayone-headless MCP server ready (read-only, http :${port})`);
+  console.error(
+    `dayone-headless MCP server ready (read-only, stateless http :${port}, ` +
+      `${MCP_HTTP_MAX_REQUEST_BODY_BYTES}-byte request limit)`,
+  );
 } else {
   await buildServer().connect(new StdioServerTransport());
   console.error("dayone-headless MCP server ready (read-only, stdio)");
