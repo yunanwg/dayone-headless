@@ -11,6 +11,7 @@ import {
   decryptJournalPrivateKey,
   decryptUserPrivateKey,
   entryD1Body,
+  MAX_D1_GZIP_LAYERS,
   maybeGunzip,
   parseD1,
 } from "../src/ingest/rest/d1.ts";
@@ -137,4 +138,13 @@ test("maybeGunzip passes plain bytes through and inflates gzip", () => {
   expect([...maybeGunzip(plain)]).toEqual([...plain]);
   const gz = new Uint8Array(gzipSync(new TextEncoder().encode("hello")));
   expect(new TextDecoder().decode(maybeGunzip(gz))).toBe("hello");
+});
+
+test("maybeGunzip bounds gzip bombs and nested layers before retaining plaintext", () => {
+  const bomb = new Uint8Array(gzipSync(new Uint8Array(4096)));
+  expect(() => maybeGunzip(bomb, 64)).toThrow(/safety limit/);
+
+  let nested = new TextEncoder().encode("synthetic");
+  for (let i = 0; i <= MAX_D1_GZIP_LAYERS; i++) nested = new Uint8Array(gzipSync(nested));
+  expect(() => maybeGunzip(nested, 4096)).toThrow(/nesting limit/);
 });

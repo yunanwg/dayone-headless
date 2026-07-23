@@ -1,141 +1,263 @@
 # Deployment
 
-Running `dayone-headless` as an always-on homelab service: a periodic sync plus
-a read-only MCP server, reached remotely and safely. See [SECURITY.md](../SECURITY.md)
-for the threat model this follows and [architecture.md](architecture.md) for how
-the pieces fit.
+Run `dayone-headless` as two least-privilege services: a periodic ingester and a
+read-only MCP server over the same private mirror. The public boundary is an
+authenticating reverse proxy; the MCP port itself stays on loopback.
 
 ## What runs
 
-`docker compose up -d` brings up two services that share **one mirror volume**:
+The Compose stack defines:
 
-- **`sync`** — runs the REST ingester on a loop (`DAYONE_SYNC_INTERVAL` seconds,
-  default 3600). The first sync is full; the rest are incremental and cheap.
-- **`mcp`** — an always-on read-only MCP server over streamable-HTTP, bound to
-  **loopback `127.0.0.1:8477`**.
+- **`sync`** — REST ingestion every `DAYONE_SYNC_INTERVAL` seconds (default
+  3600). It alone receives the Day One encryption key and upstream credential.
+- **`mcp`** — stateless Streamable HTTP on **`POST /mcp`**, published only as
+  **`127.0.0.1:8477`**. It receives no Day One upstream credentials. Because
+  the process must bind the container wildcard for a published port, it refuses
+  to start with `DAYONE_MCP_AUTH_MODE=none`; choose static or Cloudflare Access
+  authentication before starting this service.
 
-The image (`Dockerfile`) is a multi-stage `oven/bun` build. It runs **non-root**
-(`bun` user), contains **no browser** (the browser ingester is dev-only), and
-declares a `HEALTHCHECK` that goes healthy once `daytwo doctor` passes (i.e. once
-the first sync has populated the mirror).
+The application in both containers runs as the non-root `bun` user. A short
+root entrypoint receives only the capabilities needed to read an owner-only
+bind-mounted secret, copy it, assign it to `bun`, and change UID/GID. It stages
+the known files as `0400` in a non-listable `/run/dayone-secrets` tmpfs. Each
+`*_FILE` variable must name its exact `/run/secrets/<known-name>` mount; the
+container entrypoint rejects alternate paths, symlinks, and non-regular files.
+General local, non-container `*_FILE` paths remain supported by the runtime. It then
+executes Bun with empty inherited, permitted, effective, ambient, and bounding
+capability sets plus `no-new-privileges`. Secret values remain out of
+environment and Compose/container metadata. Compose also limits PIDs and uses a
+read-only root filesystem plus separate `/tmp` and secret-staging tmpfs mounts.
+The Dockerfile pins both the Bun version and its multi-architecture OCI index
+digest so an existing source revision cannot silently resolve to different base
+image bytes.
 
-The MCP server waits for the mirror to appear before serving (up to
-`DAYONE_MIRROR_WAIT` seconds, default 300), so the two services can start
-together on a fresh volume.
+The shared `/data` volume remains writable in both containers for SQLite WAL
+compatibility. SQLite may need to create or open `mirror.db-wal` and
+`mirror.db-shm`, including when the application connection is read-only. The MCP
+code therefore enforces read-only access at two independent SQLite layers:
+the database is opened with `readonly: true` and `PRAGMA query_only = ON`.
+Container filesystem policy is defense in depth, not the read-only product
+boundary.
 
-The Streamable HTTP endpoint is stateless because every tool is a self-contained
-read: each POST gets a fresh MCP server/transport, with no process-level session
-map or session IDs to expire. Bun rejects request bodies above 256 KiB before
-the handler parses JSON.
+Decrypted media is shared at `/data/media`; otherwise an MCP media lookup could
+return a cache path that exists only in `sync`.
 
-## First run
+## First run: file-mounted secrets
+
+Compose does not load credentials through `env_file`. Create owner-only files
+outside version control:
 
 ```bash
-cp .env.example .env      # fill in the secrets (below)
-docker compose up -d
-docker compose logs -f sync   # watch the first (full) sync populate the mirror
+install -d -m 700 secrets
+install -m 600 /dev/null secrets/dayone_encryption_key
+install -m 600 /dev/null secrets/dayone_api_token
 ```
 
-Or run the image directly:
+Write each value with an editor or secret manager that does not add it to shell
+history. The default stack expects:
+
+- `secrets/dayone_encryption_key`
+- `secrets/dayone_api_token`
+
+Paths can be replaced with `DAYONE_ENCRYPTION_KEY_SECRET_FILE` and
+`DAYONE_API_TOKEN_SECRET_FILE`. Runtime code reads the mounted files through
+`DAYONE_ENCRYPTION_KEY_FILE` and `DAYONE_API_TOKEN_FILE`. Setting both a direct
+secret variable and its `_FILE` companion is a startup error.
+
+Compose secret `file:` sources are bind mounts on ordinary Linux and preserve
+the host file's numeric ownership. A host-side `0600` file therefore cannot be
+read portably by a fixed image UID. The entrypoint's tmpfs staging is the
+compatibility boundary: it starts with narrow capabilities only long enough to
+copy the file, then the long-running process is UID/GID 1000 with no
+capabilities. `scripts/container-security-smoke.sh` creates synthetic secrets
+owned by UID/GID 2000, verifies that UID 1000 can read only the staged copies,
+rejects arbitrary/symlink/non-regular sources, starts with the same init topology
+as Compose, and checks the actual Bun child process for its final privilege state:
 
 ```bash
-docker build -t dayone-headless .
-docker run --rm --env-file .env -v dayone:/data dayone-headless sync
-# The read-only server needs no secrets — pass only the mirror + bind, never .env.
-docker run --rm -e DAYONE_MIRROR=/data/mirror.db -e DAYONE_MCP_PORT=8477 \
-  -e DAYONE_MCP_HOST=0.0.0.0 -p 127.0.0.1:8477:8477 -v dayone:/data \
-  dayone-headless mcp
+docker build -t dayone-headless:security-smoke .
+./scripts/container-security-smoke.sh dayone-headless:security-smoke
 ```
 
-## Environment & secrets
+Pin a stable device ID in a small, non-secret `.env`:
 
-Configure everything through `.env` (git-ignored) or your orchestrator's secret
-store. The full list is in [`.env.example`](../.env.example); the essentials:
+```dotenv
+DAYONE_DEVICE_ID=00112233445566778899aabbccddeeff
+DAYONE_SYNC_INTERVAL=3600
+```
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `DAYONE_ENCRYPTION_KEY` | yes | Your Day One encryption key, `D1-<userId>-<code…>`. Decrypts everything. |
-| `DAYONE_API_TOKEN` | one of | A 32-char API token. |
-| `DAYONE_EMAIL` + `DAYONE_PASSWORD` | one of | Credentials the client uses to self-mint / auto-renew a token. |
-| `DAYONE_DEVICE_ID` | recommended | Pin a 32-hex device identity (see below). |
-| `DAYONE_MIRROR` | no | Mirror path (compose sets `/data/mirror.db`). |
-| `DAYONE_MCP_PORT` / `DAYONE_MCP_HOST` | no | Serve streamable-HTTP on this port/host instead of stdio. Host defaults to `127.0.0.1` (loopback); compose sets it to `0.0.0.0` so the loopback-mapped published port works. |
-| `DAYONE_MCP_TOKEN` | no | If set, every HTTP request must send `Authorization: Bearer <token>` (else 401). Defense-in-depth behind the proxy. |
-| `DAYONE_MCP_ALLOWED_ORIGINS` | no | Comma-separated `Origin` allowlist for browser clients (DNS-rebinding protection). Empty (default) rejects all browser origins; non-browser MCP clients send no `Origin` and are unaffected. |
-| `DAYONE_SYNC_INTERVAL` | no | Seconds between syncs in compose (default 3600). Consumed by `sync` only. |
-| `DAYONE_MIRROR_WAIT` | no | Seconds the MCP server waits for the mirror on first boot (default 300). |
+Use your own random 32-hex device ID; the value above is synthetic documentation
+only. Then:
 
-Handling rules (the code cooperates — it only ever reads secrets from env and
-never logs them):
+```bash
+docker compose config --quiet
+docker compose up -d sync
+docker compose logs -f sync
+```
 
-- Keep `.env` with tight permissions on the ingestion host only, or use
-  Docker/compose secrets. Set `chmod 600 .env`; Compose injects this host-side
-  file without mounting it, so a doctor process inside the container cannot
-  inspect its host permissions. Never commit it (it is git-ignored, and gitleaks
-  runs in CI and pre-commit).
-- The **reading** side (the `mcp` service) needs only the mirror, not the
-  secrets. Only the `sync` side needs `DAYONE_ENCRYPTION_KEY` and auth — so the
-  compose `mcp` service deliberately has **no `env_file`**, keeping the master key
-  and password out of a process that merely reads the mirror.
-- Verify config and local plaintext permissions without exposing values:
-  `docker compose run --rm sync doctor`. Existing overly broad paths are only
-  changed when you explicitly run
-  `docker compose run --rm sync doctor --fix-permissions`. Doctor reports secret
-  *presence and shape*, never the values.
+Use `config --quiet`, not a rendered `docker compose config` dump. A rendered
+configuration can expose direct environment values supplied by an operator,
+even though this repository's default Compose file keeps credentials in secret
+files.
 
-## Pin the device id
+To mint API tokens from account credentials instead, create
+`secrets/dayone_email` and `secrets/dayone_password`, then apply the override:
 
-Without `DAYONE_DEVICE_ID`, each run generates a fresh random device identity, so
-Day One registers a **new device every sync**. Pin a stable 32-hex value once
-(any 32 hex chars) and reuse it, so repeat runs look like the same device.
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.password.yml \
+  config --quiet
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.password.yml \
+  up -d
+```
 
-## Freshness & sync cadence
+Do not grant the email/password secrets in addition to an API-token secret. The
+override removes the token-file setting so configuration remains unambiguous.
+It uses Compose's `!reset` and `!override` merge tags and therefore requires a
+current Docker Compose release.
 
-- `DAYONE_SYNC_INTERVAL` sets how often the mirror refreshes. Incremental syncs
-  are cheap, so a short interval (e.g. 15–60 min) is fine.
-- Every read result carries `synced_at`; `daytwo doctor` warns when the mirror is
-  more than 24h stale.
-- One bad entry can't fail a whole sync — it is skipped and the rest proceed.
+## HTTP security boundary
 
-## Expose it safely (Cloudflare Access)
+The origin accepts only **`POST /mcp`**. It rejects requests whose exact `Host`
+is not in `DAYONE_MCP_ALLOWED_HOSTS`, rejects browser origins not in
+`DAYONE_MCP_ALLOWED_ORIGINS`, caps request bodies at 256 KiB, and bounds active
+requests with `DAYONE_MCP_MAX_CONCURRENCY` (default 8). Cheap Host/Origin checks
+run first; static authentication and Cloudflare JWT/JWKS verification consume
+the same bounded slot as MCP handling. Overload returns `429` with
+`Retry-After: 1`. All responses carry `Cache-Control: private, no-store` and
+`X-Content-Type-Options: nosniff`.
 
-**Do not publish the MCP port raw.** It decrypts your entire journal; anyone who
-reaches it reads everything. The compose file binds it to `127.0.0.1:8477` on
-purpose.
+Set the Host allowlist to the values the application actually receives,
+including the port when non-default. Compose defaults to
+`127.0.0.1:8477,localhost:8477`; a public proxy hostname must be added
+explicitly. This allowlist prevents Host-header confusion but is **not
+authentication**. The Origin allowlist is not a CORS feature: empty means every
+browser-origin request is rejected, while ordinary non-browser MCP clients
+usually omit `Origin`.
 
-Front it with an authenticating proxy — a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/)
-tunnel is the usual self-hosted-MCP pattern:
+Authentication is explicit through `DAYONE_MCP_AUTH_MODE`:
 
-1. Run `cloudflared` alongside the stack, pointed at `http://127.0.0.1:8477`.
-2. Put a Cloudflare Access policy in front of the resulting hostname so only your
-   identity can reach it.
-3. Point your remote MCP client at the Access-protected URL.
+| Mode | Use |
+|---|---|
+| `none` | Literal loopback bind only (`127.0.0.0/8`, `::1`, or `localhost`). Startup fails on wildcard, LAN, container-network, or public binds. |
+| `static` | A minimum-32-byte bearer checked by the origin. This is a private shared-secret scheme, **not MCP OAuth**. |
+| `cloudflare-access` | Validate the `Cf-Access-Jwt-Assertion` injected by Cloudflare Access, including issuer, audience, signature, and expiry. |
 
-### Defense-in-depth on the HTTP surface
+Publishing a wildcard-bound container port only on host loopback does not relax
+this rule: the application process itself is still reachable on the container
+network. Use `static` or `cloudflare-access` for the Compose MCP service.
 
-The proxy is the primary control; the server adds two optional in-process checks
-so a misconfigured tunnel (or a rebinding browser) isn't a single point of failure:
+### Static bearer
 
-- **`DAYONE_MCP_TOKEN`** — set it and every HTTP request must carry
-  `Authorization: Bearer <token>` or gets a `401` (constant-time compared). Point
-  your MCP client (or the tunnel) at the same token. Unset = no token check.
-- **`DAYONE_MCP_ALLOWED_ORIGINS`** — a comma-separated allowlist of browser
-  `Origin` values (DNS-rebinding protection). Any request with an `Origin` not on
-  the list gets a `403` before MCP handling; the default (empty) rejects all
-  browser origins. Normal non-browser MCP clients send no `Origin` and are
-  unaffected, so you usually leave this empty.
+Create `secrets/dayone_mcp_token` with at least 32 random bytes and start with:
 
-Harden the host like any box holding a private key: least privilege, disk
-encryption, restricted egress.
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.static-auth.yml \
+  up -d
+```
+
+The client must send `Authorization: Bearer <token>`. This mode deliberately
+does not implement OAuth discovery, protected-resource metadata, token issuance,
+or audience negotiation. Do not describe it as OAuth. It also occupies the
+`Authorization` header, so it is unsuitable when an upstream MCP OAuth flow
+needs that header for its own access token.
+
+### Cloudflare Access assertion validation
+
+For an Access-protected hostname, set:
+
+```dotenv
+DAYONE_MCP_AUTH_MODE=cloudflare-access
+DAYONE_MCP_HOST=0.0.0.0
+DAYONE_CF_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com
+DAYONE_CF_ACCESS_AUD=your-application-audience-tag
+DAYONE_MCP_ALLOWED_HOSTS=journal.example.com
+```
+
+The origin retrieves Cloudflare's JWKS and validates the assertion from the
+`Cf-Access-Jwt-Assertion` header. It does not trust the header merely because it
+exists. Client OAuth `Authorization` headers are left untouched in this mode.
+Only use it where untrusted clients cannot bypass Cloudflare and reach the
+origin directly.
+
+This origin does not itself implement the MCP OAuth authorization-server
+protocol. If Cloudflare Managed OAuth is used at the edge, Cloudflare owns that
+client-facing OAuth exchange and this mode validates the resulting Access
+identity at the origin.
+
+## Tunnel topology
+
+Never publish port 8477 on a public interface.
+
+- If `cloudflared` runs on the host, its origin URL can be
+  `http://127.0.0.1:8477`.
+- If `cloudflared` runs in another Compose container, put it on the same private
+  network and use `http://mcp:8477`. Inside that container, `localhost` means the
+  tunnel container itself, not the MCP service.
+
+The proxy terminates TLS and can see plaintext journal responses. Disable
+request/response body logging and caching there. Preserve the original Host or
+add the actual forwarded value to `DAYONE_MCP_ALLOWED_HOSTS`. Restrict direct
+origin reachability so proxy authentication cannot be bypassed.
+
+## Operations
+
+- Container restart policy supplies process **liveness**. The `sync` healthcheck
+  is separate **outcome/freshness readiness**: the latest attempt must not be
+  degraded/failed/unknown and the last complete mirror must be within
+  `DAYONE_SYNC_MAX_STALENESS_SECONDS` (default 86400). It evaluates recorded
+  local outcomes; it does not claim that upstream credentials or Day One's API
+  are currently reachable.
+- The `mcp` healthcheck performs a synthetic `tools/list` request against the
+  canonical `POST /mcp` path with an allowed Host. In `none`/`static` mode it
+  expects a successful request. In Cloudflare Access mode it expects the origin
+  to reject a probe without an assertion, proving the local route and auth gate
+  without claiming a live JWKS/signature check.
+- `DAYONE_HTTP_TIMEOUT_MS` bounds each upstream REST request (default 60000;
+  range 1000–300000).
+- Every upstream body is consumed through a streaming decoded-byte ceiling:
+  login 64 KiB, journal manifest and user-key responses 4 MiB, an entries feed
+  32 MiB, one encrypted entry 4 MiB, and one encrypted attachment 64 MiB.
+  A manifest is additionally capped at 1,024 journals, a feed at 25,000 items,
+  a whole sync at 100,000 observed entry references, retained mapped source at
+  64 MiB per journal, and a media worklist at 100,000 rows. Feed lines are
+  counted and parsed incrementally; malformed JSON fails closed. Decrypted D1
+  entry plaintext is capped at 16 MiB at every gzip layer with at most three
+  nested layers. Exceeding a boundary fails or degrades the attempt rather than
+  aggregating unbounded memory.
+- `DAYONE_SYNC_INTERVAL` accepts integer seconds from 60–86400 (default 3600);
+  `DAYONE_MIRROR_WAIT` accepts 1–3600 (default 300).
+- `DAYONE_SYNC_CONCURRENCY` accepts 1–64 (default 8);
+  `DAYONE_MEDIA_CONCURRENCY` accepts 1–32 (default 6); and
+  `DAYONE_MCP_MAX_CONCURRENCY` accepts 1–256 (default 8). Malformed, fractional,
+  non-positive, or excessive values fail closed.
+- Every read result carries `synced_at`; `daytwo doctor` warns after 24 hours
+  without a complete sync.
+- A degraded sync does not advance last-complete freshness and retries failed
+  entries next run.
+- Unattended sync/media progress logs contain only synthetic-safe categories and
+  counts, never decrypted journal names or entry/media identifiers.
+- `docker compose run --rm sync doctor` reports secret presence/shape and local
+  plaintext permissions without printing values.
+- `doctor --fix-permissions` is an explicit repair operation; normal health
+  checks never broaden permissions.
+
+The `@hono/node-server` transitive dependency is overridden to a patched
+release. `test/hono-node-server-compat.test.ts` starts that exact adapter under
+Node and makes a real HTTP request so future dependency changes cannot silently
+break the wrapper boundary.
 
 ## Backups
 
-The mirror is a plain SQLite file and a **lossless copy** of your journal (every
-row keeps the verbatim source in its `raw` column; only media bytes live
-elsewhere). To back it up, snapshot the volume or copy `mirror.db` (include the
-`-wal` / `-shm` sidecars, or checkpoint first) somewhere private — it contains
-decrypted journal text, so treat it as sensitive as the journal itself. Restoring
-is just putting the file back; a fresh `sync` will also rebuild it from scratch.
+The mirror contains decrypted journal text and metadata; `/data/media` contains
+decrypted attachment bytes. Back up both. For a live SQLite backup, snapshot the
+whole volume (including `-wal` and `-shm`) or checkpoint before copying the main
+database. Encrypt backups and apply the same access controls as the journal.
 
 ## Releases
 

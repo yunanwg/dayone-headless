@@ -7,10 +7,16 @@ import { z } from "zod";
 import {
   handleStatelessMcpHttpRequest,
   MCP_HTTP_MAX_REQUEST_BODY_BYTES,
+  MCP_HTTP_PATH,
+  RequestConcurrencyLimiter,
   type StatelessMcpHttpOptions,
 } from "../src/serve/mcp-http.ts";
 
-const openGate = { token: undefined, allowedOrigins: new Set<string>() };
+const openGate = {
+  authentication: { mode: "none" as const },
+  allowedOrigins: new Set<string>(),
+  allowedHosts: new Set(["mcp.test"]),
+};
 const mcpHeaders = {
   accept: "application/json, text/event-stream",
   "content-type": "application/json",
@@ -39,6 +45,7 @@ test("official client initializes, lists tools, and calls tools over independent
   let builds = 0;
   const requests: Array<{ method: string; sessionId: string | null }> = [];
   const responseSessionIds: Array<string | null> = [];
+  const responseCacheControls: Array<string | null> = [];
   const options: StatelessMcpHttpOptions = {
     gate: openGate,
     buildServer: () => {
@@ -51,10 +58,13 @@ test("official client initializes, lists tools, and calls tools over independent
     requests.push({ method: req.method, sessionId: req.headers.get("mcp-session-id") });
     const response = await handleStatelessMcpHttpRequest(req, options);
     responseSessionIds.push(response.headers.get("mcp-session-id"));
+    responseCacheControls.push(response.headers.get("cache-control"));
     return response;
   };
 
-  const transport = new StreamableHTTPClientTransport(new URL("http://mcp.test/mcp"), { fetch: fetcher });
+  const transport = new StreamableHTTPClientTransport(new URL(`http://mcp.test${MCP_HTTP_PATH}`), {
+    fetch: fetcher,
+  });
   const client = new Client({ name: "stateless-test-client", version: "1.0.0" });
   await client.connect(transport);
 
@@ -72,6 +82,7 @@ test("official client initializes, lists tools, and calls tools over independent
   expect(requests.some((request) => request.method === "GET")).toBe(true);
   expect(requests.every((request) => request.sessionId === null)).toBe(true);
   expect(responseSessionIds.every((sessionId) => sessionId === null)).toBe(true);
+  expect(responseCacheControls.every((value) => value === "private, no-store")).toBe(true);
 });
 
 test("a non-initialize request works independently while malformed JSON returns a protocol error", async () => {
@@ -117,7 +128,11 @@ test("auth runs before parsing and does not construct a server for rejected JSON
       body: "{not-json",
     }),
     {
-      gate: { token: "synthetic-token", allowedOrigins: new Set<string>() },
+      gate: {
+        authentication: { mode: "static", token: "synthetic-token".repeat(3) },
+        allowedOrigins: new Set<string>(),
+        allowedHosts: new Set(["mcp.test"]),
+      },
       buildServer: () => {
         builds++;
         return testServer();
@@ -142,7 +157,7 @@ test("GET and DELETE are authenticated but unsupported without stateless session
 
   for (const method of ["GET", "DELETE"]) {
     const response = await handleStatelessMcpHttpRequest(
-      new Request("http://mcp.test/mcp", { method }),
+      new Request(`http://mcp.test${MCP_HTTP_PATH}`, { method }),
       options,
     );
     expect(response.status).toBe(405);
@@ -150,6 +165,88 @@ test("GET and DELETE are authenticated but unsupported without stateless session
     expect(await response.text()).toContain("Method not allowed");
   }
   expect(builds).toBe(0);
+});
+
+test("only /mcp is routed and every response disables caching and sniffing", async () => {
+  const options: StatelessMcpHttpOptions = { gate: openGate, buildServer: testServer };
+  const response = await handleStatelessMcpHttpRequest(
+    new Request("http://mcp.test/alternate", { method: "POST", headers: mcpHeaders, body: "{}" }),
+    options,
+  );
+  expect(response.status).toBe(404);
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+});
+
+test("concurrency overload returns 429 without constructing another server", async () => {
+  const limiter = new RequestConcurrencyLimiter(1);
+  const release = limiter.acquire();
+  expect(release).not.toBeNull();
+  let builds = 0;
+  const response = await handleStatelessMcpHttpRequest(
+    new Request(`http://mcp.test${MCP_HTTP_PATH}`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    }),
+    {
+      gate: openGate,
+      limiter,
+      buildServer: () => {
+        builds++;
+        return testServer();
+      },
+    },
+  );
+  expect(response.status).toBe(429);
+  expect(response.headers.get("retry-after")).toBe("1");
+  expect(builds).toBe(0);
+  release?.();
+});
+
+test("Cloudflare assertion verification consumes the bounded request slot", async () => {
+  let releaseVerification: (() => void) | undefined;
+  let verificationCalls = 0;
+  const limiter = new RequestConcurrencyLimiter(1);
+  const gate = {
+    authentication: {
+      mode: "cloudflare-access" as const,
+      verifier: {
+        verify: async () => {
+          verificationCalls++;
+          await new Promise<void>((resolve) => {
+            releaseVerification = resolve;
+          });
+        },
+      },
+    },
+    allowedOrigins: new Set<string>(),
+    allowedHosts: new Set(["mcp.test"]),
+  };
+  const makeRequest = () =>
+    new Request(`http://mcp.test${MCP_HTTP_PATH}`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "cf-access-jwt-assertion": "synthetic-assertion" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+  const first = handleStatelessMcpHttpRequest(makeRequest(), {
+    gate,
+    limiter,
+    buildServer: testServer,
+  });
+  while (!releaseVerification) await Bun.sleep(1);
+
+  const overloaded = await handleStatelessMcpHttpRequest(makeRequest(), {
+    gate,
+    limiter,
+    buildServer: testServer,
+  });
+  expect(overloaded.status).toBe(429);
+  expect(verificationCalls).toBe(1);
+
+  releaseVerification();
+  expect((await first).status).toBe(200);
 });
 
 test("Bun rejects a body over 256 KiB before invoking the MCP handler", async () => {

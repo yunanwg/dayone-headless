@@ -20,6 +20,8 @@ import { deriveMasterAesKey, importAesKey, rsaUnwrap } from "./crypto.ts";
 const subtle = globalThis.crypto.subtle;
 const td = new TextDecoder();
 const MD5_LEN = 16;
+export const MAX_D1_PLAINTEXT_BYTES = 16 * 1024 * 1024;
+export const MAX_D1_GZIP_LAYERS = 3;
 
 export interface D1Envelope {
   type: number;
@@ -65,10 +67,52 @@ function pemToDer(pem: string): Uint8Array {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-/** Un-gzip transparently (Day One binaryFormat≥2 gzips content; up to 3 passes). */
-export function maybeGunzip(u: Uint8Array): Uint8Array {
+function isGzip(u: Uint8Array): boolean {
+  return u[0] === 0x1f && u[1] === 0x8b;
+}
+
+/** Inflate one gzip layer without allowing the decoded output to exceed a hard ceiling. */
+export function gunzipBounded(u: Uint8Array, maximumBytes: number): Uint8Array {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+    throw new RangeError("maximum gunzip bytes must be a positive safe integer");
+  }
+  try {
+    const out = new Uint8Array(gunzipSync(u, { maxOutputLength: maximumBytes }));
+    if (out.byteLength > maximumBytes) throw new Error("limit");
+    return out;
+  } catch {
+    throw new Error(`D1 gzip output is invalid or exceeded the ${maximumBytes}-byte safety limit`);
+  }
+}
+
+/**
+ * Un-gzip transparently (Day One binaryFormat≥2 gzips content), bounding every
+ * layer before it can become retained decrypted source.
+ */
+export function maybeGunzip(
+  u: Uint8Array,
+  maximumBytes = MAX_D1_PLAINTEXT_BYTES,
+  maximumLayers = MAX_D1_GZIP_LAYERS,
+): Uint8Array {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+    throw new RangeError("maximum plaintext bytes must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maximumLayers) || maximumLayers < 0) {
+    throw new RangeError("maximum gzip layers must be a non-negative safe integer");
+  }
+  if (u.byteLength > maximumBytes) {
+    throw new Error(`D1 plaintext exceeded the ${maximumBytes}-byte safety limit`);
+  }
+
   let out = u;
-  for (let i = 0; i < 3 && out[0] === 0x1f && out[1] === 0x8b; i++) out = new Uint8Array(gunzipSync(out));
+  let layers = 0;
+  while (isGzip(out)) {
+    if (layers >= maximumLayers) {
+      throw new Error(`D1 content exceeded the ${maximumLayers}-layer gzip nesting limit`);
+    }
+    out = gunzipBounded(out, maximumBytes);
+    layers++;
+  }
   return out;
 }
 

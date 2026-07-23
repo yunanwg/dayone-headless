@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * the REST ingester — run the full env-only pipeline (no browser) and report what decrypted.
  * Prints counts and lengths only, never entry content.
@@ -10,11 +11,11 @@
  *   bun run src/ingest/rest/run.ts
  */
 
+import { requireSecret } from "../../secret-config.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { RestReader } from "./reader.ts";
 
-const masterKey = process.env.DAYONE_ENCRYPTION_KEY;
-if (!masterKey) throw new Error("set DAYONE_ENCRYPTION_KEY (the D1-<userId>-<code…> encryption key)");
+const masterKey = requireSecret("DAYONE_ENCRYPTION_KEY");
 
 const api = new DayOneApi(apiConfigFromEnv());
 const reader = new RestReader(api, masterKey);
@@ -26,18 +27,18 @@ console.error(
 
 const maxPerJournal = process.env.DAYONE_MAX_ENTRIES ? Number(process.env.DAYONE_MAX_ENTRIES) : Infinity;
 let total = 0;
+let journalNumber = 0;
 for (const j of keys.journals) {
   if (!j?.encryption?.vault?.keys?.length) continue;
+  journalNumber++;
   let n = 0;
   for await (const e of reader.decryptJournal(j.id, keys)) {
     n++;
     if (n === 1)
-      console.error(`  [${j.name ?? j.id}] sample entry ${e.entryId}: ${e.content.length} chars decrypted`);
+      console.error(`  journal ${journalNumber}: first entry decrypted (${e.content.length} chars)`);
     if (n >= maxPerJournal) break;
   }
   total += n;
-  console.error(
-    `  journal ${j.name ?? j.id}: ${n} entries decrypted${n >= maxPerJournal ? " (capped)" : ""}`,
-  );
+  console.error(`  journal complete: ${n} entries decrypted${n >= maxPerJournal ? " (capped)" : ""}`);
 }
 console.error(`done — ${total} entries decrypted from env alone, no browser`);

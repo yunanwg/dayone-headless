@@ -24,7 +24,8 @@ exports/
 src/ingest/browser/
 test/
 docs/
-scripts/
+scripts/*
+!scripts/container-entrypoint.sh
 biome.json
 lefthook.yml
 .gitleaks.toml
