@@ -19,8 +19,11 @@ import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import { checkHttpGate, httpGateConfigFromEnv } from "./http-auth.ts";
 import {
+  GET_ENTRIES_MAX,
+  getEntries,
   getEntry,
   getEntryMedia,
+  getStats,
   getSyncedAt,
   InvalidSearchQueryError,
   listEntries,
@@ -29,6 +32,8 @@ import {
   type MediaFile,
   onThisDay,
   resolveMedia,
+  SEARCH_QUERY_MAX_CHARS,
+  SEARCH_QUERY_MAX_TERMS,
   searchEntries,
 } from "./queries.ts";
 
@@ -67,11 +72,16 @@ function buildServer(): McpServer {
     { name: "dayone-headless", version: "0.1.0" },
     {
       instructions:
-        "Read-only access to a personal Day One journal mirror. Find entries with search_entries " +
-        "(keyword/phrase) or list_entries (filter by journal/tag/date/place/starred), browse the " +
-        "facets with list_journals / list_tags, then get_entry for full content and get_media for " +
-        "an attachment's bytes. `synced_at` on each result says how fresh the mirror is. This is " +
-        "READ-ONLY — you cannot create or edit entries.",
+        "Read-only access to a personal Day One journal mirror, sized for analysis over ten-plus " +
+        "years of entries. For any longitudinal or overview question ('shape of my last decade', " +
+        "'when did I write most'), call get_stats FIRST — it maps the whole corpus (counts, date " +
+        "span, text volume by year/month/journal) without reading a word. Then find entries with " +
+        "search_entries (keyword/phrase; handles Chinese and other CJK text) or list_entries " +
+        "(filter by journal/tag/date/place/starred; include_text to read bodies in bulk). Read " +
+        "content with get_entry (one, curated) or get_entries (up to " +
+        `${GET_ENTRIES_MAX}, with optional per-entry truncation). Browse facets with list_journals ` +
+        "/ list_tags; get an attachment's bytes with get_media. Every result carries `synced_at` " +
+        "(mirror freshness). READ-ONLY — you cannot create or edit entries.",
     },
   );
 
@@ -86,14 +96,54 @@ function buildServer(): McpServer {
   );
 
   server.registerTool(
+    "get_stats",
+    {
+      description:
+        "The corpus map — the CHEAP FIRST CALL for any longitudinal or overview question ('shape " +
+        "of my last 10 years', 'which years / journals hold the most'). Aggregates entry counts, " +
+        "date span, and text volume, grouped by year / month / journal, optionally narrowed by the " +
+        "same filters as list_entries. Returns overall totals + per-bucket {key, entries, " +
+        "text_chars, starred}. No entry text — use it to plan which entries are worth reading.",
+      inputSchema: {
+        group_by: z
+          .enum(["year", "month", "journal"])
+          .describe("bucket entries by calendar year, calendar month (YYYY-MM), or journal name"),
+        journal: z.string().optional().describe("exact journal name (see list_journals)"),
+        tag: z.string().optional().describe("exact tag name (see list_tags)"),
+        starred: z.boolean().optional().describe("only starred entries when true"),
+        from: z.string().optional().describe("inclusive lower bound on date, ISO-8601 (e.g. 2023-01-01)"),
+        to: z.string().optional().describe("inclusive upper bound; a bare YYYY-MM-DD covers the whole day"),
+        place: z.string().optional().describe("case-insensitive substring of place / locality / country"),
+      },
+      annotations: READ_ONLY,
+    },
+    async ({ group_by, ...filters }) =>
+      json({ synced_at: getSyncedAt(db), ...getStats(db, group_by, filters) }),
+  );
+
+  server.registerTool(
     "search_entries",
     {
       description:
-        "Full-text search over entry bodies, highest-ranked first. Optionally narrow with the " +
-        "same filters as list_entries (journal / tag / date range / place / starred) — e.g. " +
-        "'coffee' in 2021 in journal Trips. Returns uuid, date, place, snippet; call get_entry for full content.",
+        "Full-text search over entry bodies. Latin queries rank by relevance; CJK queries " +
+        "(Chinese/Japanese/Korean) fall back to substring match, newest first, because the index " +
+        "does not segment CJK words — so a 2-char Chinese term like 咖啡 still recalls correctly. " +
+        `Multiple terms are ANDed (maximum ${SEARCH_QUERY_MAX_TERMS} terms and ` +
+        `${SEARCH_QUERY_MAX_CHARS} characters). Optionally narrow with the same filters as list_entries ` +
+        "(journal / tag / date range / place / starred) — e.g. 'coffee' in 2021 in journal Trips. " +
+        "Each hit returns uuid, date, place, journal, tags, text_length, and a snippet; call " +
+        "get_entry / get_entries for full content.",
       inputSchema: {
-        query: z.string().describe("FTS5 query, e.g. 'paris coffee' or 'trip NOT work'"),
+        query: z
+          .string()
+          .max(SEARCH_QUERY_MAX_CHARS)
+          .refine((value) => value.split(/\s+/).filter(Boolean).length <= SEARCH_QUERY_MAX_TERMS, {
+            message: `maximum ${SEARCH_QUERY_MAX_TERMS} whitespace-separated terms`,
+          })
+          .describe(
+            `search query (max ${SEARCH_QUERY_MAX_CHARS} characters / ${SEARCH_QUERY_MAX_TERMS} terms), ` +
+              "e.g. 'paris coffee' or 'trip NOT work'",
+          ),
         journal: z.string().optional().describe("exact journal name (see list_journals)"),
         tag: z.string().optional().describe("exact tag name (see list_tags)"),
         starred: z.boolean().optional().describe("only starred entries when true"),
@@ -132,9 +182,11 @@ function buildServer(): McpServer {
     {
       description:
         "Structured browse (no text query) — filter entries by journal, tag, date range, " +
-        "place, or starred, newest first, with pagination. Use this for 'my last N entries', " +
-        "'everything tagged X in 2023', 'starred entries from Paris'. For keyword/phrase " +
-        "matching use search_entries instead. All filters AND together. Call get_entry for full content.",
+        "place, or starred, with pagination. Use this for 'my last N entries', 'everything tagged " +
+        "X in 2023', 'starred entries from Paris'. Set include_text=true to read whole bodies in " +
+        "bulk (each row carries text_length so you can gauge cost first); order_by=length surfaces " +
+        "the longest, most reflective entries. For keyword/phrase matching use search_entries. All " +
+        "filters AND together. Call get_entry / get_entries for a single entry's full detail.",
       inputSchema: {
         journal: z.string().optional().describe("exact journal name (see list_journals)"),
         tag: z.string().optional().describe("exact tag name (see list_tags)"),
@@ -142,6 +194,14 @@ function buildServer(): McpServer {
         from: z.string().optional().describe("inclusive lower bound on date, ISO-8601 (e.g. 2023-01-01)"),
         to: z.string().optional().describe("inclusive upper bound; a bare YYYY-MM-DD covers the whole day"),
         place: z.string().optional().describe("case-insensitive substring of place / locality / country"),
+        include_text: z
+          .boolean()
+          .default(false)
+          .describe("return each entry's full text instead of a 140-char snippet (default false)"),
+        order_by: z
+          .enum(["date", "length", "editing_time"])
+          .default("date")
+          .describe("sort key, all newest/largest first: date (default) | length | editing_time"),
         limit: z.number().int().min(1).max(200).default(50).describe("max results (default 50)"),
         offset: z.number().int().min(0).default(0).describe("skip N results, for paging (default 0)"),
       },
@@ -165,17 +225,76 @@ function buildServer(): McpServer {
     "get_entry",
     {
       description:
-        "Get one entry's full content + metadata by uuid. For the entry's attached media, use " +
-        "get_entry_media (the metadata list) or get_media with a media identifier (the actual bytes).",
-      inputSchema: { uuid: z.string().describe("entry uuid from search_entries / on_this_day") },
+        "Get one entry as a curated, token-lean object: text, journal, date, tags, flags, " +
+        "location, weather, media metadata, and text_length. Rich text and the verbatim raw " +
+        "object are omitted by default because they can be substantially larger than plain text; " +
+        "opt back in with include_rich_text / include_raw only when you truly need them. For the " +
+        "entry's media bytes use get_media.",
+      inputSchema: {
+        uuid: z.string().describe("entry uuid from search_entries / list_entries / on_this_day"),
+        include_rich_text: z
+          .boolean()
+          .default(false)
+          .describe("add the structured rich-text JSON (default false)"),
+        include_raw: z
+          .boolean()
+          .default(false)
+          .describe("add the potentially large verbatim raw source object (default false)"),
+      },
       annotations: READ_ONLY,
     },
-    async ({ uuid }) => {
-      const entry = getEntry(db, uuid);
+    async ({ uuid, include_rich_text, include_raw }) => {
+      const entry = getEntry(db, uuid, {
+        includeRichText: include_rich_text,
+        includeRaw: include_raw,
+      });
       return entry
-        ? json(entry)
+        ? json({ synced_at: getSyncedAt(db), entry })
         : { content: [{ type: "text" as const, text: `no entry: ${uuid}` }], isError: true };
     },
+  );
+
+  server.registerTool(
+    "get_entries",
+    {
+      description:
+        `Batch curated read — fetch up to ${GET_ENTRIES_MAX} entries by uuid in one call, in the ` +
+        "order given, each with the same curated shape as get_entry. Use it to read a set of hits " +
+        "from search_entries / list_entries at once instead of many get_entry calls. Set max_chars " +
+        "to cap each body (a truncation note reports how much was cut). Unknown uuids come back in " +
+        "`missing`, never as an error.",
+      inputSchema: {
+        uuids: z
+          .array(z.string())
+          .min(1)
+          .max(GET_ENTRIES_MAX)
+          .describe(`entry uuids, in the order you want them back (max ${GET_ENTRIES_MAX})`),
+        max_chars: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe("truncate each entry's text to this many chars (default: no truncation)"),
+        include_rich_text: z
+          .boolean()
+          .default(false)
+          .describe("add rich-text JSON per entry (default false)"),
+        include_raw: z
+          .boolean()
+          .default(false)
+          .describe("add the raw source object per entry (default false)"),
+      },
+      annotations: READ_ONLY,
+    },
+    async ({ uuids, max_chars, include_rich_text, include_raw }) =>
+      json({
+        synced_at: getSyncedAt(db),
+        ...getEntries(db, uuids, {
+          maxChars: max_chars,
+          includeRichText: include_rich_text,
+          includeRaw: include_raw,
+        }),
+      }),
   );
 
   server.registerTool(

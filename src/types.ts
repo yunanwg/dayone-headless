@@ -1,8 +1,8 @@
 /**
  * Day One JSON-export shape — the project's STABLE CONTRACT.
  *
- * Reconciled against a real 4-journal export (3577 entries) on 2026-07-22 via
- * key-union introspection. Field names/coverage below reflect that export.
+ * Validated through key-union introspection of representative export samples.
+ * Field names and optionality below reflect the observed export shape.
  * Unmodeled fields are still preserved verbatim via the mirror's `raw` column —
  * the mirror is also the portable backup, so nothing is ever dropped.
  *
@@ -19,7 +19,7 @@ export interface DayOneExport {
 
 export interface DayOneEntry {
   uuid: string;
-  /** ISO-8601, UTC. Present on 100% of entries. */
+  /** ISO-8601, UTC. */
   creationDate: string;
   modifiedDate: string;
   /** IANA tz name; entry-local wall time = creationDate in this zone. */
@@ -27,22 +27,22 @@ export interface DayOneEntry {
 
   /** Body as Markdown. */
   text: string;
-  /** Structured rich-text JSON (stringified): `{ meta, contents }`. Superset of `text`. ~88%. */
+  /** Optional structured rich-text JSON (stringified): `{ meta, contents }`. Superset of `text`. */
   richText?: string;
 
   starred: boolean;
   /** NB: the export key is `isPinned`, not `pinned`. */
   isPinned: boolean;
   isAllDay: boolean;
-  /** Seconds spent editing. ~91%. */
+  /** Optional seconds spent editing. */
   editingTime?: number;
   duration?: number;
 
-  /** Present on ~9% of entries only. */
+  /** Optional entry tags. */
   tags?: string[];
-  /** e.g. import source marker. ~11%. */
+  /** Optional import source marker. */
   sourceString?: string;
-  /** Template-created entries. ~1%. */
+  /** Optional metadata for template-created entries. */
   template?: Record<string, unknown>;
 
   creationDevice: string;

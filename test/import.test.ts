@@ -63,14 +63,15 @@ test("isPinned maps to the pinned column", () => {
   db.close();
 });
 
-test("raw column round-trips the source entry via getEntry", () => {
+test("raw column round-trips the source entry via getEntry (include_raw)", () => {
   const db = freshMirror();
   importExport(db, sample, "sample");
   const original = sample.entries[0]!;
-  const got = getEntry(db, original.uuid);
+  // Curated shape by default; the verbatim source is opt-in via include_raw and
+  // must round-trip byte-for-byte with the imported entry object.
+  const got = getEntry(db, original.uuid, { includeRaw: true });
   expect(got).not.toBeNull();
-  // Full verbatim round-trip: raw === JSON.stringify(entry).
-  expect(JSON.stringify(got)).toBe(JSON.stringify(original));
+  expect(JSON.stringify(got!.raw)).toBe(JSON.stringify(original));
   expect(got!.text).toBe(original.text);
   db.close();
 });

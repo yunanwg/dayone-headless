@@ -265,8 +265,8 @@ test("integration: mapper output imports into a real in-memory mirror", () => {
   const got = getEntry(db, "ENTRY18CHARIDAA01");
   expect(got).not.toBeNull();
   expect(got!.text).toBe("# Morning\n\nSynthetic body text about a synthetic day.");
-  expect(got!.creationDate).toBe(CREATED_ISO);
-  expect(got!.timeZone).toBe("Europe/Paris");
+  expect(got!.creation_date).toBe(CREATED_ISO);
+  expect(got!.time_zone).toBe("Europe/Paris");
 
   // Media landed in the mirror (photo + video + audio = 3 rows).
   const mediaCount = (db.query("SELECT COUNT(*) n FROM media").get() as { n: number }).n;
