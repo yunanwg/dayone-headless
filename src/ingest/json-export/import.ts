@@ -43,8 +43,24 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
       $weather_code, $temperature_c, $raw
     )
     ON CONFLICT(uuid) DO UPDATE SET
-      creation_date = excluded.creation_date, modified_date = excluded.modified_date,
-      text = excluded.text, rich_text = excluded.rich_text, raw = excluded.raw
+      journal_id = excluded.journal_id,
+      creation_date = excluded.creation_date,
+      modified_date = excluded.modified_date,
+      time_zone = excluded.time_zone,
+      text = excluded.text,
+      rich_text = excluded.rich_text,
+      starred = excluded.starred,
+      pinned = excluded.pinned,
+      is_all_day = excluded.is_all_day,
+      editing_time = excluded.editing_time,
+      latitude = excluded.latitude,
+      longitude = excluded.longitude,
+      place_name = excluded.place_name,
+      locality_name = excluded.locality_name,
+      country = excluded.country,
+      weather_code = excluded.weather_code,
+      temperature_c = excluded.temperature_c,
+      raw = excluded.raw
   `);
   const insertTag = db.query(`INSERT INTO tag (name) VALUES (?) ON CONFLICT(name) DO NOTHING RETURNING id`);
   const getTagId = db.query(`SELECT id FROM tag WHERE name = ?`);
@@ -52,7 +68,13 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
   const insertMedia = db.query(`
     INSERT INTO media (identifier, entry_uuid, kind, md5, type, order_in_entry, raw)
     VALUES ($identifier, $entry_uuid, $kind, $md5, $type, $order_in_entry, $raw)
-    ON CONFLICT(identifier) DO UPDATE SET raw = excluded.raw
+    ON CONFLICT(identifier) DO UPDATE SET
+      entry_uuid = excluded.entry_uuid,
+      kind = excluded.kind,
+      md5 = excluded.md5,
+      type = excluded.type,
+      order_in_entry = excluded.order_in_entry,
+      raw = excluded.raw
   `);
   const insertFts = db.query(`INSERT INTO entry_fts (uuid, text) VALUES (?, ?)`);
   // Idempotency: clear an entry's derived rows before re-inserting, so re-imports
@@ -69,6 +91,11 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
   const tagIdCache = new Map<string, number>();
 
   const run = db.transaction((entries: DayOneEntry[]) => {
+    // Clear media for every imported entry before inserting any replacement.
+    // An identifier can move between entries; deleting per-entry during the
+    // insertion pass would make the result depend on export order.
+    for (const e of entries) delMedia.run(e.uuid);
+
     for (const e of entries) {
       insertEntry.run({
         $uuid: e.uuid,
@@ -111,7 +138,6 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
         }
       }
 
-      delMedia.run(e.uuid);
       const kinds: [keyof DayOneEntry, string][] = [
         ["photos", "photo"],
         ["videos", "video"],
@@ -125,7 +151,7 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
             $entry_uuid: e.uuid,
             $kind: kind,
             $md5: isValidMd5(m.md5) ? m.md5 : null,
-            $type: m.type ?? null,
+            $type: m.type ?? m.format ?? null,
             $order_in_entry: m.orderInEntry ?? null,
             $raw: JSON.stringify(m),
           });
