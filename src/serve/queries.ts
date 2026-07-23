@@ -72,18 +72,76 @@ export function getEntry(db: Database, uuid: string): Record<string, unknown> | 
   return row ? (JSON.parse(row.raw) as Record<string, unknown>) : null;
 }
 
-export function searchEntries(db: Database, query: string, limit = 25): EntrySummary[] {
+/**
+ * Build the shared structured-filter WHERE fragments + params, over `entry e`
+ * joined to `journal j`. Used by both listEntries and searchEntries so the two
+ * surfaces filter identically; the caller owns MATCH, ORDER BY, and pagination.
+ */
+function entryFilterClauses(filters: ListFilters): {
+  clauses: string[];
+  params: Record<string, string | number>;
+} {
+  const clauses: string[] = [];
+  const params: Record<string, string | number> = {};
+
+  if (filters.journal !== undefined) {
+    clauses.push("j.name = $journal");
+    params.$journal = filters.journal;
+  }
+  if (filters.starred !== undefined) {
+    clauses.push("e.starred = $starred");
+    params.$starred = filters.starred ? 1 : 0;
+  }
+  if (filters.from !== undefined) {
+    clauses.push("e.creation_date >= $from");
+    params.$from = filters.from;
+  }
+  if (filters.to !== undefined) {
+    // Append '~' (0x7E, above 'T'/'Z') so a bare date upper bound is inclusive
+    // of that whole day, and a full timestamp bound stays inclusive too.
+    clauses.push("e.creation_date <= $to");
+    params.$to = `${filters.to}~`;
+  }
+  if (filters.place !== undefined) {
+    clauses.push("(e.place_name LIKE $place OR e.locality_name LIKE $place OR e.country LIKE $place)");
+    params.$place = `%${filters.place}%`;
+  }
+  if (filters.tag !== undefined) {
+    // Correlated existence check keeps the row-per-entry shape (no fan-out).
+    clauses.push(
+      "EXISTS (SELECT 1 FROM entry_tag et JOIN tag t ON t.id = et.tag_id " +
+        "WHERE et.entry_uuid = e.uuid AND t.name = $tag)",
+    );
+    params.$tag = filters.tag;
+  }
+
+  return { clauses, params };
+}
+
+/**
+ * Full-text search over entry bodies, optionally narrowed by the same structured
+ * filters as listEntries (journal / tag / date range / place / starred). Ranked
+ * by FTS relevance, so "coffee in 2021, journal Trips" is one call. The text
+ * query is required; every filter is optional and ANDs onto the match.
+ */
+export function searchEntries(db: Database, query: string, filters: ListFilters = {}): EntrySummary[] {
+  const { clauses, params } = entryFilterClauses(filters);
+  params.$q = query;
+  params.$limit = filters.limit ?? 25;
+  params.$offset = filters.offset ?? 0;
+
   return db
     .query(
       `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
               snippet(entry_fts, 1, '[', ']', ' … ', 12) AS snippet
        FROM entry_fts
        JOIN entry e ON e.uuid = entry_fts.uuid
-       WHERE entry_fts MATCH ?
+       JOIN journal j ON j.id = e.journal_id
+       WHERE entry_fts MATCH $q${clauses.length ? ` AND ${clauses.join(" AND ")}` : ""}
        ORDER BY rank
-       LIMIT ?`,
+       LIMIT $limit OFFSET $offset`,
     )
-    .all(query, limit) as EntrySummary[];
+    .all(params) as EntrySummary[];
 }
 
 /**
@@ -93,40 +151,7 @@ export function searchEntries(db: Database, query: string, limit = 25): EntrySum
  * "starred entries from Paris", etc. All filters AND together.
  */
 export function listEntries(db: Database, filters: ListFilters = {}): EntrySummary[] {
-  const where: string[] = [];
-  const params: Record<string, string | number> = {};
-
-  if (filters.journal !== undefined) {
-    where.push("j.name = $journal");
-    params.$journal = filters.journal;
-  }
-  if (filters.starred !== undefined) {
-    where.push("e.starred = $starred");
-    params.$starred = filters.starred ? 1 : 0;
-  }
-  if (filters.from !== undefined) {
-    where.push("e.creation_date >= $from");
-    params.$from = filters.from;
-  }
-  if (filters.to !== undefined) {
-    // Append '~' (0x7E, above 'T'/'Z') so a bare date upper bound is inclusive
-    // of that whole day, and a full timestamp bound stays inclusive too.
-    where.push("e.creation_date <= $to");
-    params.$to = `${filters.to}~`;
-  }
-  if (filters.place !== undefined) {
-    where.push("(e.place_name LIKE $place OR e.locality_name LIKE $place OR e.country LIKE $place)");
-    params.$place = `%${filters.place}%`;
-  }
-  if (filters.tag !== undefined) {
-    // Correlated existence check keeps the row-per-entry shape (no fan-out).
-    where.push(
-      "EXISTS (SELECT 1 FROM entry_tag et JOIN tag t ON t.id = et.tag_id " +
-        "WHERE et.entry_uuid = e.uuid AND t.name = $tag)",
-    );
-    params.$tag = filters.tag;
-  }
-
+  const { clauses, params } = entryFilterClauses(filters);
   params.$limit = filters.limit ?? 50;
   params.$offset = filters.offset ?? 0;
 
@@ -138,7 +163,7 @@ export function listEntries(db: Database, filters: ListFilters = {}): EntrySumma
                FROM entry_tag et JOIN tag t ON t.id = et.tag_id
                WHERE et.entry_uuid = e.uuid) AS tag_list
        FROM entry e JOIN journal j ON j.id = e.journal_id
-       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
        ORDER BY e.creation_date DESC, e.uuid
        LIMIT $limit OFFSET $offset`,
     )

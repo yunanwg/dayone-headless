@@ -70,6 +70,29 @@ test("searchEntries finds by body text and returns a snippet", () => {
   expect(searchEntries(db, "nonexistentwordxyz")).toHaveLength(0);
 });
 
+test("searchEntries narrows by the same structured filters as listEntries", () => {
+  // 'journal' matches the homelab entry (sample) and the lone 'other' entry.
+  expect(
+    searchEntries(db, "journal")
+      .map((e) => e.uuid)
+      .sort(),
+  ).toEqual(["IIII9999JJJJ0000KKKK1111LLLL2222", "ZZZZ0000ZZZZ0000ZZZZ0000ZZZZ0000"].sort());
+  // scoped to the 'other' journal → just its entry.
+  expect(searchEntries(db, "journal", { journal: "other" }).map((e) => e.uuid)).toEqual([
+    "ZZZZ0000ZZZZ0000ZZZZ0000ZZZZ0000",
+  ]);
+  // scoped by date range → just the 2023 sample entry.
+  expect(searchEntries(db, "journal", { from: "2023-01-01" }).map((e) => e.uuid)).toEqual([
+    "IIII9999JJJJ0000KKKK1111LLLL2222",
+  ]);
+  // scoped by tag → just the homelab entry.
+  expect(searchEntries(db, "journal", { tag: "homelab" }).map((e) => e.uuid)).toEqual([
+    "IIII9999JJJJ0000KKKK1111LLLL2222",
+  ]);
+  // limit still respected alongside filters.
+  expect(searchEntries(db, "journal", { limit: 1 })).toHaveLength(1);
+});
+
 test("onThisDay matches month-day across years, newest first", () => {
   // 2021-07-22 and 2019-07-22 both fall on 07-22.
   const hits = onThisDay(db, "07-22");
