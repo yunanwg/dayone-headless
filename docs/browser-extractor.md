@@ -36,14 +36,14 @@ objects and feeds the same importer the JSON path uses.
 - **Automated passphrase login** (`login.ts:automatedLogin`) is a scaffold. The
   sign-in appears to route through an Automattic/WordPress SSO; the exact
   login/decrypt selectors are **not yet confirmed** and the function throws rather
-  than ship guessed credential-entry code. Closing it needs a **joint recon pass**
+  than ship guessed credential-entry code. Closing it needs a **joint capture pass**
   (a human drives one login while we capture the DOM + network flow).
 
 ## Completeness gate (non-negotiable)
 
-The web cache is **lazy** — recon Q2 found the `J4` journal at 0 cached
-entries (its metadata + keys present, `is_decrypted=1`) though the export had 52.
-A naive dump silently ships a partial mirror.
+The web cache is **lazy** — a journal can show its metadata + keys
+(`is_decrypted=1`) but **0 cached entries** until it is opened, even when the
+export has many. A naive dump silently ships a partial mirror.
 
 `entry_counts_cache` is the oracle: per journal it holds the server-side
 `count` (+ `photo`/`video`/`audio`/`pdf`), matching the JSON export exactly.
@@ -59,13 +59,13 @@ write** while any journal is short (`DAYONE_STRICT=1`, default). Deleted rows
   like a private key: gitignored (`profile/`), tight perms, on the ingestion host
   only. Same posture as the master key in the security model.
 
-## Validated end-to-end (2026-07-22)
+## Validated end-to-end
 
 Full pipeline run on real data, no Mac: headless Chrome-for-Testing (Playwright) →
 decrypted IndexedDB → force-load all journals → gate → map → mirror → CLI. Result
-**byte-matches the official JSON export**: 3577 entries, 2469 media, dates in
-`…Z` (no ms) format. The lazy `J4` filled 0→52 via force-load and passed
-the gate. (Tiny open item: location count 2971 vs export 2970 — reconcile.)
+**byte-matches the official JSON export** (entry, media, and date formats all
+reconciled; dates in `…Z`, no ms). Lazily-cached journals fill via force-load and
+pass the gate. (Known open item: a small location-count off-by-one to reconcile.)
 
 Fresh-profile behavior confirmed: after login the app syncs the **journal list +
 server counts** but downloads **no entries until a journal is selected** — so
@@ -74,8 +74,8 @@ server counts** but downloads **no entries until a journal is selected** — so
 
 ## Open TODOs
 
-1. **`automatedLogin` selectors** — joint recon pass (above). The persistent-profile
+1. **`automatedLogin` selectors** — joint capture pass (above). The persistent-profile
    manual login works today; automation is the remaining piece.
-2. Reconcile the location 2971-vs-2970 off-by-one against the export oracle.
+2. Reconcile the known location-count off-by-one against the export oracle.
 3. Verify media/`moments` completeness thresholds (thumbnails/promises may lag;
    the gate deliberately checks entries only).

@@ -15,23 +15,23 @@ ingester needs **no crypto**: read the Dexie stores and translate them into the
 mirror (whose contract is the JSON-export shape, see `src/types.ts`). Crypto is
 the REST ingester's concern only.
 
-## Source: Dexie DB `DODexie` (v920, 41 object stores)
+## Source: Dexie DB `DODexie` (many object stores)
 
-Non-empty stores (record counts on this account):
+Stores that matter to the browser ingester:
 
-| store | count | role for the browser ingester |
-|---|---|---|
-| `entries` | 3525 | primary — decrypted entries |
-| `moments` | 2459 | media/attachments |
-| `journals` | 4 | journal list |
-| `tags` | 314 | tags |
-| `medias` | 8 | (secondary media table — TBD vs `moments`) |
-| `content_keys` / `user_keys` / `vaults` | 1 / 2 / 4 | **REST ingester only** — key material, not read by the browser ingester |
-| `search`, `kv`, `server_flags`, `sync_states`, `devices`, `daily_chats`, `pbc_templates`, … | — | not needed for read mirror |
+| store | role for the browser ingester |
+|---|---|
+| `entries` | primary — decrypted entries |
+| `moments` | media/attachments |
+| `journals` | journal list |
+| `tags` | tags |
+| `medias` | secondary media table — TBD vs `moments` |
+| `content_keys` / `user_keys` / `vaults` | **REST ingester only** — key material, not read by the browser ingester |
+| `search`, `kv`, `server_flags`, `sync_states`, `devices`, `daily_chats`, `pbc_templates`, … | not needed for read mirror |
 
-Note: IndexedDB `entries`=3525 vs the JSON export's 3577. ~52 gap ≈ the
-`J4` journal size — **investigate** whether some journals aren't synced
-to the web client or are counted differently before trusting the browser ingester as complete.
+Note: the IndexedDB `entries` store can lag the JSON export's total when a journal
+hasn't been force-loaded (the cache is lazy). **Verify per-journal completeness**
+before trusting the browser ingester as complete.
 
 ## Encoding gotchas (apply across every mapping)
 
@@ -108,16 +108,15 @@ decrypted client-side). The mirror only needs `id` + `name`; keep the rest in
 `raw` if useful.
 
 ## `tags` → mirror `tag` / `entry_tag`
-Shape TBD (record truncated during recon; count 314). Reconcile before use.
+Shape TBD (record truncated during capture). Reconcile before use.
 
 ## Browser-ingester extraction requirements
 
-- **Completeness is NOT free — the IndexedDB cache is lazy.** Recon found the
-  `J4` journal present in `journals` (metadata + keys, `is_decrypted=1`)
-  but with **0 entries** in `entries`, exactly the 52-entry gap vs the export
-  (J1/J2/J3 matched to the record). The web client loads a journal's
-  entries on demand. So the browser ingester **must force-load every journal** (open each in the
-  driven web app, wait for sync) and then **verify per-journal counts** before
+- **Completeness is NOT free — the IndexedDB cache is lazy.** A journal can be
+  present in `journals` (metadata + keys, `is_decrypted=1`) yet have **0 rows** in
+  `entries` until it is opened — the web client loads a journal's entries on
+  demand. So the browser ingester **must force-load every journal** (open each in
+  the driven web app, wait for sync) and then **verify per-journal counts** before
   trusting the dump. Emit a loud warning on any shortfall — never silently ship a
   partial mirror.
 - **Filter soft-deletes.** `entries.is_deleted` exists; skip `is_deleted` rows.
@@ -136,12 +135,12 @@ Shape TBD (record truncated during recon; count 314). Reconcile before use.
    `creationDate`+`text` hash), not uuid. Flag when mixing a browser-ingester
    mirror with a JSON-export mirror — same entry,
    different PK → dedupe by content.
-2. **RESOLVED — the 3525 vs 3577 gap is the entire `J4` journal** (lazy
-   cache, see above), not scattered missing entries.
-3. `medias` (8) vs `moments` (2459) — what is the `medias` store for. (open)
+2. **RESOLVED — an entries shortfall vs the export traces to an entire un-opened
+   journal** (lazy cache, see above), not scattered missing entries.
+3. `medias` vs `moments` — what is the `medias` store for. (open)
 4. `tags` record shape. (open)
 5. **RESOLVED — epoch dates are true UTC.** `new Date(entries.date).toISOString()`
    matched three export `creationDate` values verbatim (to the second). Strip
    milliseconds to match the export's `…Z` format. This timestamp match also
-   gives the content-based identity anchor Q1 needs, and cross-validated that the
-   J3 journal's IndexedDB == its export.
+   gives the content-based identity anchor Q1 needs, and cross-validated that a
+   journal's IndexedDB entries == its export.
