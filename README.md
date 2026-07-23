@@ -235,9 +235,10 @@ Tools exposed (all read-only):
   them into an unbounded response; legacy batch flags are rejected with a
   migration message instead of being silently ignored.
 - `get_entry_media` — media attached to an entry, as metadata only (never bytes).
-- `get_media` — the decrypted **bytes** of one attachment by identifier (photos
-  inline as an image; larger/other files as a local path). Serves from the cache
-  only — populate it with `media-fetch`; never fetches or decrypts.
+- `get_media` — the decrypted **bytes** of one attachment by identifier (small
+  photos inline as an image; larger/other files return metadata only, never a
+  server-local path). Serves from the cache only — populate it with
+  `media-fetch`; never fetches or decrypts.
 - `on_this_day` — entries matching a month-day across years.
 
 Read results keep the backwards-compatible top-level `synced_at` (the last

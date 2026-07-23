@@ -19,6 +19,12 @@ import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import { checkHttpGate, httpGateConfigFromEnv } from "./http-auth.ts";
 import {
+  MEDIA_IDENTIFIER_MAX_CHARS,
+  mediaNotFoundResult,
+  presentCachedMedia,
+  publicMediaMetadata,
+} from "./mcp-media.ts";
+import {
   ENTRY_UUID_MAX_CHARS,
   GET_ENTRIES_DEFAULT_PER_ENTRY_CHARS,
   GET_ENTRIES_DEFAULT_TOTAL_CHARS,
@@ -36,7 +42,6 @@ import {
   listEntriesPage,
   listJournals,
   listTags,
-  type MediaFile,
   onThisDay,
   resolveMedia,
   SEARCH_QUERY_MAX_CHARS,
@@ -64,13 +69,6 @@ const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 });
 
-// Inline media cap: base64 inflates ~33%, and huge blobs bloat the context. Above
-// this, return the path/metadata instead of the bytes.
-const MAX_INLINE_MEDIA = 4 * 1024 * 1024;
-const mimeOf = (m: MediaFile): string =>
-  m.kind === "pdf"
-    ? "application/pdf"
-    : `${m.kind === "photo" ? "image" : m.kind}/${m.type ?? "octet-stream"}`;
 const todayMonthDay = () => {
   const n = new Date();
   return `${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
@@ -389,33 +387,31 @@ function buildServer(): McpServer {
     {
       description:
         "Get the decrypted BYTES of one media attachment by its identifier (from get_entry_media). " +
-        "Photos under a size cap are returned inline as an image; other/large files return " +
-        "their local path + metadata. Bytes must be fetched first with the `daytwo media-fetch` CLI — " +
-        "if not cached, this reports how to populate it. Read-only: it never fetches.",
-      inputSchema: { identifier: z.string().describe("media identifier from an entry's media list") },
+        "Photos under a size cap are returned inline as an image; other/large files return metadata " +
+        "without exposing or reading the server-local file. Bytes must be fetched first with the " +
+        "`daytwo media-fetch` CLI — if not cached, this reports how to populate it. Read-only: it " +
+        "never fetches.",
+      inputSchema: {
+        identifier: z
+          .string()
+          .max(MEDIA_IDENTIFIER_MAX_CHARS)
+          .describe(
+            `media identifier from an entry's media list (max ${MEDIA_IDENTIFIER_MAX_CHARS} characters)`,
+          ),
+      },
       annotations: READ_ONLY,
     },
     async ({ identifier }) => {
       const m = resolveMedia(db, identifier);
-      if (!m) return { content: [{ type: "text" as const, text: `no media: ${identifier}` }], isError: true };
+      if (!m) return mediaNotFoundResult();
       if (!m.cached || !m.path) {
-        return json({ ...m, note: "bytes not cached — run `daytwo media-fetch` on the ingestion host" });
+        return json({
+          ...publicMediaMetadata(m),
+          inline: false,
+          note: "bytes not cached — run `daytwo media-fetch` on the ingestion host",
+        });
       }
-      const bytes = new Uint8Array(await Bun.file(m.path).arrayBuffer());
-      if (m.kind === "photo" && bytes.length <= MAX_INLINE_MEDIA) {
-        return {
-          content: [
-            { type: "image" as const, data: Buffer.from(bytes).toString("base64"), mimeType: mimeOf(m) },
-          ],
-        };
-      }
-      // Too big or not an image: hand back where it is + how to read it.
-      return json({
-        ...m,
-        size: bytes.length,
-        mimeType: mimeOf(m),
-        note: "read the bytes from `path` locally",
-      });
+      return presentCachedMedia(m);
     },
   );
 
