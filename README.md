@@ -94,8 +94,22 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo doctor` | Config + mirror health self-check (reports secret *presence/shape*, never values). |
 | `daytwo journals` | List journals with entry counts and freshness. |
 | `daytwo search <q> [limit]` | Full-text search over entry bodies. |
+| `daytwo list [filters]` | Structured browse — filter/paginate without a text query. |
+| `daytwo tags` | All tags with entry counts, most-used first. |
 | `daytwo get <uuid>` | One entry's full content + metadata. |
 | `daytwo on-this-day [MM-DD]` | Entries for a month-day across years (defaults to today). |
+
+`list` filters are all optional and ANDed together:
+
+```
+daytwo list --journal <name> --tag <name> --starred \
+            --from <ISO> --to <ISO> --place <substr> \
+            --limit <n> --offset <n>
+```
+
+`--from`/`--to` bound `creation_date` (both inclusive; a bare `YYYY-MM-DD` `--to`
+covers the whole day). `--place` is a case-insensitive substring over place /
+locality / country. Newest first; page with `--limit`/`--offset`.
 
 Run via `bun run src/serve/cli.ts <cmd>`, the `daytwo` bin, or the package
 scripts: `bun run sync | mcp | cli | import | check | lint | format | typecheck | test`.
@@ -127,7 +141,10 @@ whatever runs `sync`.)
 Tools exposed (all read-only; media is returned as metadata only, never bytes):
 
 - `list_journals` — journals + entry counts + `synced_at`.
+- `list_tags` — every tag with its entry count, most-used first.
 - `search_entries` — FTS5 query over bodies; returns uuid, date, place, snippet.
+- `list_entries` — structured browse: filter by journal / tag / date range /
+  place / starred, newest first, paginated. The complement to `search_entries`.
 - `get_entry` — full entry by uuid.
 - `on_this_day` — entries matching a month-day across years.
 
