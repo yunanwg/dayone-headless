@@ -17,8 +17,9 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 -- Ingestion metadata: freshness (`synced_at` = last complete attempt), source,
--- schema version, and completeness keys managed by src/sync-status.ts. Serving
--- exposes both legacy `synced_at` and detailed `sync_status`.
+-- schema version, completeness keys, and monotonic sync_generation managed by
+-- src/sync-status.ts. Serving exposes both legacy `synced_at` and detailed
+-- `sync_status`.
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT

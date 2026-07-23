@@ -11,6 +11,7 @@
  *   daytwo sync-status          show last attempt + last complete sync state
  *   daytwo journals             list journals + counts + freshness
  *   daytwo stats <group_by>     corpus map: counts/text volume by year|month|journal
+ *   daytwo sample [target] [filters]  metadata-only longitudinal evidence plan
  *   daytwo search <q> [limit]   full-text search (CJK-capable)
  *   daytwo list [filters]       structured browse (see flags below)
  *   daytwo tags                 all tags with entry counts
@@ -19,7 +20,7 @@
  *   daytwo media-file <id>      resolve a media identifier to its cached bytes path
  *   daytwo on-this-day [MM-DD]  entries for a month-day across years
  *
- * `list` (and `search` / `stats`) filters (all optional, ANDed):
+ * `list` (and `search` / `stats` / `sample`) filters (all optional, ANDed):
  *   --journal <name> --tag <name> --starred --from <ISO> --to <ISO>
  *   --place <substr> --limit <n> --offset <n>
  *   --include-text --max-chars-per-entry <n> --max-total-chars <n> (list only)
@@ -28,6 +29,7 @@
 
 import { existsSync } from "node:fs";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
+import { SnapshotValidationError, sampleEntries } from "./evidence.ts";
 import {
   getEntry,
   getEntryMedia,
@@ -210,6 +212,61 @@ switch (cmd) {
     break;
   }
 
+  case "sample": {
+    let target: number | undefined;
+    let bestEffort = false;
+    const filters: ListFilters = {};
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i]!;
+      if (arg === "--best-effort") {
+        bestEffort = true;
+      } else if (arg === "--target") {
+        const value = rest[++i];
+        if (value === undefined) {
+          console.error("--target requires a value");
+          process.exit(1);
+        }
+        target = Number(value);
+      } else if (arg === "--journal") {
+        filters.journal = rest[++i];
+      } else if (arg === "--tag") {
+        filters.tag = rest[++i];
+      } else if (arg === "--starred") {
+        filters.starred = true;
+      } else if (arg === "--from") {
+        filters.from = rest[++i];
+      } else if (arg === "--to") {
+        filters.to = rest[++i];
+      } else if (arg === "--place") {
+        filters.place = rest[++i];
+      } else if (!arg.startsWith("--") && target === undefined) {
+        target = Number(arg);
+      } else {
+        console.error(`unknown sample option: ${arg}`);
+        process.exit(1);
+      }
+    }
+    const db = requireMirror();
+    try {
+      out(
+        sampleEntries(db, {
+          target,
+          mode: bestEffort ? "best_effort" : "complete_only",
+          ...filters,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SnapshotValidationError) {
+        console.error(`${error.code}: ${error.message}`);
+        db.close();
+        process.exit(2);
+      }
+      throw error;
+    }
+    db.close();
+    break;
+  }
+
   case "search": {
     const query = rest[0];
     if (!query) {
@@ -290,7 +347,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | sync-status | media-fetch [uuid] | mcp | doctor | journals | stats <year|month|journal> | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
+      "commands: sync | sync-status | media-fetch [uuid] | mcp | doctor | journals | stats <year|month|journal> | sample [target] [--best-effort] | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }

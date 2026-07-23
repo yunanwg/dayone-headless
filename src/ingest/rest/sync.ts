@@ -18,7 +18,13 @@
  */
 
 import { openMirror } from "../../serve/db/open.ts";
-import { recordSyncOutcome, recordSyncStart, type SyncState } from "../../sync-status.ts";
+import {
+  assertSyncAttempt,
+  recordSyncOutcome,
+  recordSyncStart,
+  StaleSyncAttemptError,
+  type SyncState,
+} from "../../sync-status.ts";
 import type { DayOneEntry } from "../../types.ts";
 import { importExport } from "../json-export/import.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
@@ -99,9 +105,11 @@ export async function sync(
   const concurrency = resolveConcurrency(opts);
   const attemptedAt = opts.nowIso ?? new Date().toISOString();
   const db = openMirror(opts.mirrorPath, { writable: true });
-  recordSyncStart(db, attemptedAt, "rest");
+  let attempt: ReturnType<typeof recordSyncStart> | undefined;
   let failed = 0;
   try {
+    attempt = recordSyncStart(db, attemptedAt, "rest");
+    const generation = attempt.sync_generation;
     const reader: SyncReader = opts.reader ?? new RestReader(new DayOneApi(apiConfigFromEnv()), masterKey);
     const keys = await reader.unlockKeys();
     log(`unlocked ${keys.journalPrivByFingerprint.size} journal key(s)`);
@@ -136,17 +144,6 @@ export async function sync(
       const remove = new Set<string>();
       for (const r of refs) if (r.deleted && stored.has(r.entryId)) remove.add(r.entryId);
       for (const u of stored.keys()) if (!feedUuids.has(u)) remove.add(u);
-      if (remove.size) {
-        db.transaction((uuids: string[]) => {
-          for (const u of uuids) {
-            delEntry.run(u);
-            delFts.run(u);
-            delSync.run(u);
-          }
-        })([...remove]);
-        removed += remove.size;
-      }
-
       // Changed: new or bumped revisionId → re-fetch + decrypt (bounded concurrency).
       const toFetch = refs.filter((r) => !r.deleted && stored.get(r.entryId) !== r.revisionId);
       const result = await fetchChangedEntries(
@@ -156,13 +153,23 @@ export async function sync(
       );
       const { mapped, done } = result;
       failed += result.failed;
-      if (mapped.length) {
-        importExport(db, { metadata: { version: "rest" }, entries: mapped }, name);
-        db.transaction((rs: EntryRef[]) => {
-          for (const r of rs) setSync.run(r.entryId, j.id, r.revisionId);
-        })(done);
-        changed += mapped.length;
-      }
+      // One guarded write transaction per journal: a newer overlapping sync may
+      // start while network/decryption is in flight, but this stale attempt can
+      // never mutate entries or revisions after generation ownership changes.
+      db.transaction(() => {
+        assertSyncAttempt(db, generation);
+        for (const uuid of remove) {
+          delEntry.run(uuid);
+          delFts.run(uuid);
+          delSync.run(uuid);
+        }
+        if (mapped.length) {
+          importExport(db, { metadata: { version: "rest" }, entries: mapped }, name);
+          for (const r of done) setSync.run(r.entryId, j.id, r.revisionId);
+        }
+      }).immediate();
+      removed += remove.size;
+      changed += mapped.length;
       log(
         `  ${name}: +${mapped.length} changed, -${remove.size} removed` +
           (result.failed ? `, !${result.failed} failed` : ""),
@@ -170,12 +177,16 @@ export async function sync(
     }
 
     const status = failed === 0 ? "complete" : "degraded";
-    const recorded = recordSyncOutcome(db, {
-      status,
-      attemptedAt,
-      failedEntries: failed,
-      source: "rest",
-    });
+    const recorded = recordSyncOutcome(
+      db,
+      {
+        status,
+        attemptedAt,
+        failedEntries: failed,
+        source: "rest",
+      },
+      generation,
+    );
     return {
       journals: journalCount,
       changed,
@@ -187,12 +198,26 @@ export async function sync(
       syncedAt: recorded.last_complete_at,
     };
   } catch (error) {
-    recordSyncOutcome(db, {
-      status: "failed",
-      attemptedAt,
-      failedEntries: failed,
-      source: "rest",
-    });
+    if (attempt) {
+      try {
+        recordSyncOutcome(
+          db,
+          {
+            status: "failed",
+            attemptedAt,
+            failedEntries: failed,
+            source: "rest",
+          },
+          attempt.sync_generation,
+        );
+      } catch (outcomeError) {
+        // A newer attempt owns the mirror; do not let this stale process overwrite
+        // its status. Preserve the original error unless the CAS itself revealed
+        // the stale overlap.
+        if (!(outcomeError instanceof StaleSyncAttemptError)) throw outcomeError;
+        if (!(error instanceof StaleSyncAttemptError)) throw error;
+      }
+    }
     throw error;
   } finally {
     db.close();
