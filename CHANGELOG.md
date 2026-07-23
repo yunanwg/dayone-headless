@@ -4,36 +4,6 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/) once it cuts its first tagged release.
 
-## 0.1.0 (2026-07-23)
-
-
-### Features
-
-* **cli:** unified `dayone` entry point + doctor self-check ([68fe158](https://github.com/yunanwg/dayone-headless/commit/68fe158e1576a1da907f83a392f4bffc4b65f966))
-* **github:** add Claude Code GitHub Workflow ([#1](https://github.com/yunanwg/dayone-headless/issues/1)) ([b2ba35b](https://github.com/yunanwg/dayone-headless/commit/b2ba35ba907e7c8045e64859a4ac00dc81bca171))
-* **ingest:** reconcile export contract against real data + Tier A crosswalk ([004d01b](https://github.com/yunanwg/dayone-headless/commit/004d01b3b164d2a9b75587d1b88bece4f941bc0a))
-* REST sync + MCP server + freshness; adopt Biome toolchain ([cb8adb3](https://github.com/yunanwg/dayone-headless/commit/cb8adb37c70604721899dce915d87b3fbce2548b))
-* **serve:** Phase 1 serving-layer spine (bun + SQLite mirror) ([107798a](https://github.com/yunanwg/dayone-headless/commit/107798a5ae8b87ce75f3847b2c992ea34f683980))
-* **tier-a:** headless extractor — dump, completeness gate, orchestrator ([61c7003](https://github.com/yunanwg/dayone-headless/commit/61c7003642b4a825bb1f770e5ec443ba7a487fc0))
-* **tier-a:** IndexedDB → export mapper (pure, no browser/crypto) ([abbbcd9](https://github.com/yunanwg/dayone-headless/commit/abbbcd9823ef2442f61780fc300622bbd9898659))
-* **tier-c:** crypto primitives, RSA-OAEP unwrap validated vs vault oracle ([e7133fa](https://github.com/yunanwg/dayone-headless/commit/e7133faf060088c6c6a4f4c6edeaf574b40ff6cb))
-* **tier-c:** D1 envelope decrypt — full chain works end-to-end, no browser ([91335ed](https://github.com/yunanwg/dayone-headless/commit/91335edefb5112d4e688085e31ae1093c15d74ca))
-* **tier-c:** passphrase path + full env-only reader (no browser at all) ([711fcea](https://github.com/yunanwg/dayone-headless/commit/711fceac50c5f6664b56c8ad5921bdecafcd50cb))
-* **tier-c:** pure-REST client (env-driven, no browser) + D1 envelope decode ([ee1b655](https://github.com/yunanwg/dayone-headless/commit/ee1b6555f6ca3868ce5c8ae6061e9801d5e4d27c))
-* **tier-c:** run.ts — env-only CLI entry to exercise the full pipeline ([28fb92f](https://github.com/yunanwg/dayone-headless/commit/28fb92f7e573e91c6776f68dc56925b55896a618))
-* **tier-c:** self-contained client headers — env needs only credentials ([6db4a60](https://github.com/yunanwg/dayone-headless/commit/6db4a60caacbc513dfa91b26db58b8b7846d85e9))
-* **tier-c:** self-minting token — headless login + auto-renew ([0cf474c](https://github.com/yunanwg/dayone-headless/commit/0cf474cbb6a3f7019d6a8f52c60e99fecda8695a))
-* **tier-c:** validated cold-start end-to-end; rename to DAYONE_ENCRYPTION_KEY ([3849eaa](https://github.com/yunanwg/dayone-headless/commit/3849eaa9b01ac2f96ca5a3031fb45d587fbaa6e4))
-* typed error taxonomy + CHANGELOG ([7b73293](https://github.com/yunanwg/dayone-headless/commit/7b732935903863353d9af5e7af9b6496ca44f559))
-
-
-### Bug Fixes
-
-* **mcp:** stateful session routing for streamable-HTTP transport ([2c92ef2](https://github.com/yunanwg/dayone-headless/commit/2c92ef2deae2a9a76c5110f8d4d5141635adb2b1))
-* **rest:** decrypt journal display names (D1 type-00 via the vault key) ([37a57aa](https://github.com/yunanwg/dayone-headless/commit/37a57aa6bc99ab876fd19ce66a6f9897dfec5dbd))
-* **security:** recon/ was not gitignored (inline-comment bug) ([3f26b33](https://github.com/yunanwg/dayone-headless/commit/3f26b331df15da67467b0664c771ff25ac0d080a))
-* **tier-a:** auth signal + per-journal force-load; E2E validated on real data ([678eb47](https://github.com/yunanwg/dayone-headless/commit/678eb4782a1c3f2189d3cb529232500ff16352c7))
-
 ## [Unreleased]
 
 ### Added
