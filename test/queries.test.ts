@@ -9,6 +9,7 @@ import { importExport } from "../src/ingest/json-export/import.ts";
 import { openMirror } from "../src/serve/db/open.ts";
 import {
   getEntry,
+  getEntryMedia,
   listEntries,
   listJournals,
   listTags,
@@ -58,6 +59,21 @@ test("getEntry returns the raw entry, or null for an unknown uuid", () => {
   expect(e!.uuid).toBe("AAAA1111BBBB2222CCCC3333DDDD4444");
   expect(typeof e!.text).toBe("string");
   expect(getEntry(db, "does-not-exist")).toBeNull();
+});
+
+test("getEntryMedia returns attached media metadata, [] when none", () => {
+  const media = getEntryMedia(db, "AAAA1111BBBB2222CCCC3333DDDD4444");
+  expect(media).toHaveLength(1);
+  expect(media[0]).toEqual({
+    identifier: "PHOTO-ID-1",
+    kind: "photo",
+    md5: "abc123",
+    type: "jpeg",
+    order_in_entry: 0,
+  });
+  // Entry with no attachments, and an unknown uuid, both yield [].
+  expect(getEntryMedia(db, "EEEE5555FFFF6666GGGG7777HHHH8888")).toEqual([]);
+  expect(getEntryMedia(db, "does-not-exist")).toEqual([]);
 });
 
 test("searchEntries finds by body text and returns a snippet", () => {

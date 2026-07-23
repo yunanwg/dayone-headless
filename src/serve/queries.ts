@@ -72,6 +72,31 @@ export function getEntry(db: Database, uuid: string): Record<string, unknown> | 
   return row ? (JSON.parse(row.raw) as Record<string, unknown>) : null;
 }
 
+/** Media METADATA attached to one entry (never bytes), in entry order. */
+export interface MediaMeta {
+  identifier: string;
+  kind: string; // photo | video | audio | pdf
+  md5: string | null;
+  type: string | null;
+  order_in_entry: number | null;
+}
+
+/**
+ * The media attached to an entry, as metadata only — identifier / kind / md5 /
+ * type / order. The actual photo/video/audio/pdf bytes are never mirrored; this
+ * is what an agent sees to know an entry HAS attachments and how to reference
+ * them. Empty array for an entry with no media (or an unknown uuid).
+ */
+export function getEntryMedia(db: Database, uuid: string): MediaMeta[] {
+  return db
+    .query(
+      `SELECT identifier, kind, md5, type, order_in_entry
+       FROM media WHERE entry_uuid = ?
+       ORDER BY order_in_entry, identifier`,
+    )
+    .all(uuid) as MediaMeta[];
+}
+
 /**
  * Build the shared structured-filter WHERE fragments + params, over `entry e`
  * joined to `journal j`. Used by both listEntries and searchEntries so the two
