@@ -23,6 +23,11 @@ The MCP server waits for the mirror to appear before serving (up to
 `DAYONE_MIRROR_WAIT` seconds, default 300), so the two services can start
 together on a fresh volume.
 
+The Streamable HTTP endpoint is stateless because every tool is a self-contained
+read: each POST gets a fresh MCP server/transport, with no process-level session
+map or session IDs to expire. Bun rejects request bodies above 256 KiB before
+the handler parses JSON.
+
 ## First run
 
 ```bash

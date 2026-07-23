@@ -178,6 +178,9 @@ By default it serves over **stdio** (for a local client that spawns the process)
 set `DAYONE_MCP_PORT` to serve **streamable-HTTP** instead (for an always-on
 service). The HTTP server binds to **loopback `127.0.0.1`** by default
 (`DAYONE_MCP_HOST` overrides it) — always keep it behind an authenticating proxy.
+The HTTP transport is stateless: every POST gets a fresh MCP server/transport,
+with no retained session map or session IDs. Request bodies are capped at 256
+KiB by Bun before JSON parsing.
 
 For defense-in-depth on the HTTP transport (behind that proxy), two optional env
 knobs harden the process itself: `DAYONE_MCP_TOKEN` requires
