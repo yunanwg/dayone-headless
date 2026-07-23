@@ -139,6 +139,85 @@ test("FTS is populated for every entry with body text", () => {
   db.close();
 });
 
+test("partial re-import rebuilds FTS only for UUIDs in the incoming batch", () => {
+  const targetUuid = "FTSTARGET00000000000000000000001";
+  const untouchedUuid = "FTSUNTOUCHED0000000000000000001";
+  const entry = (uuid: string, text: string) =>
+    ({
+      uuid,
+      creationDate: "2024-01-01T00:00:00Z",
+      modifiedDate: "2024-01-01T00:00:00Z",
+      timeZone: "UTC",
+      text,
+      starred: false,
+      isPinned: false,
+      isAllDay: false,
+      creationDevice: "Synthetic Device",
+      creationDeviceType: "Synthetic",
+      creationOSName: "SyntheticOS",
+      creationOSVersion: "1.0",
+    }) satisfies DayOneExport["entries"][number];
+
+  const db = freshMirror();
+  importExport(
+    db,
+    {
+      metadata: { version: "1.0" },
+      entries: [
+        entry(targetUuid, "obsolete target token"),
+        entry(untouchedUuid, "persistent sentinel token"),
+      ],
+    },
+    "synthetic",
+  );
+  importExport(
+    db,
+    { metadata: { version: "1.0" }, entries: [entry(targetUuid, "replacement target token")] },
+    "synthetic",
+  );
+
+  expect(db.query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH 'obsolete'").get()).toBeNull();
+  expect(db.query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH 'replacement'").get()).toEqual({
+    uuid: targetUuid,
+  });
+  expect(db.query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH 'persistent'").get()).toEqual({
+    uuid: untouchedUuid,
+  });
+  expect((db.query("SELECT COUNT(*) AS n FROM entry_fts").get() as { n: number }).n).toBe(2);
+  db.close();
+});
+
+test("duplicate UUIDs in one import keep only the last FTS body", () => {
+  const uuid = "FTSDUPLICATE00000000000000000001";
+  const entry = (text: string) =>
+    ({
+      uuid,
+      creationDate: "2024-01-01T00:00:00Z",
+      modifiedDate: "2024-01-01T00:00:00Z",
+      timeZone: "UTC",
+      text,
+      starred: false,
+      isPinned: false,
+      isAllDay: false,
+      creationDevice: "Synthetic Device",
+      creationDeviceType: "Synthetic",
+      creationOSName: "SyntheticOS",
+      creationOSVersion: "1.0",
+    }) satisfies DayOneExport["entries"][number];
+
+  const db = freshMirror();
+  importExport(
+    db,
+    { metadata: { version: "1.0" }, entries: [entry("first duplicate body"), entry("last duplicate body")] },
+    "synthetic",
+  );
+
+  expect(db.query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH 'first'").get()).toBeNull();
+  expect(db.query("SELECT uuid FROM entry_fts WHERE entry_fts MATCH 'last'").get()).toEqual({ uuid });
+  expect((db.query("SELECT COUNT(*) AS n FROM entry_fts").get() as { n: number }).n).toBe(1);
+  db.close();
+});
+
 test("re-import replaces every typed entry column and permits journal, null, and false transitions", () => {
   const uuid = "REIMPORT000000000000000000000001";
   const originalEntry = {
