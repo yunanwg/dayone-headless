@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/) once it cuts its first tagged release.
 
+## [0.1.1](https://github.com/yunanwg/dayone-headless/compare/v0.1.0...v0.1.1) (2026-07-23)
+
+
+### Features
+
+* fetch + decrypt attachment bytes (media-fetch) ([#22](https://github.com/yunanwg/dayone-headless/issues/22)) ([6efb180](https://github.com/yunanwg/dayone-headless/commit/6efb180c656d49603e9751e57490dcd5d83c3944))
+* filterable full-text search ([#15](https://github.com/yunanwg/dayone-headless/issues/15)) ([08cc137](https://github.com/yunanwg/dayone-headless/commit/08cc137e1eeee1cf7ff2d8d69ff84e90447c00cc))
+* REST decryption conformance harness (export oracle) ([#16](https://github.com/yunanwg/dayone-headless/issues/16)) ([e7d3577](https://github.com/yunanwg/dayone-headless/commit/e7d3577a37014bc585735e6d02bbcf17189b33c0))
+* **serve:** resolveMedia + media-file/get_media + docs ([#20](https://github.com/yunanwg/dayone-headless/issues/20)) ([a3165a0](https://github.com/yunanwg/dayone-headless/commit/a3165a04579254d876879434470fcde310e297d1))
+* structured query surface (list_entries, list_tags) ([#13](https://github.com/yunanwg/dayone-headless/issues/13)) ([c6ba31b](https://github.com/yunanwg/dayone-headless/commit/c6ba31b6aa9ce41bfccf2ddc9ea5a0ed404c685a))
+* surface entry media metadata (get_entry_media) ([#14](https://github.com/yunanwg/dayone-headless/issues/14)) ([ebb12b2](https://github.com/yunanwg/dayone-headless/commit/ebb12b2b4cfd0744dc95dd31ed2cac4b6346127a))
+
 ## 0.1.0 (2026-07-23)
 
 
