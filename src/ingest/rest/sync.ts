@@ -22,6 +22,7 @@ import type { DayOneEntry } from "../../types.ts";
 import { importExport } from "../json-export/import.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { mapEntry } from "./map.ts";
+import { runPool } from "./pool.ts";
 import { type EntryRef, RestReader } from "./reader.ts";
 
 export interface SyncResult {
@@ -29,6 +30,44 @@ export interface SyncResult {
   changed: number;
   removed: number;
   syncedAt: string;
+}
+
+const DEFAULT_SYNC_CONCURRENCY = 8;
+
+/** `opts.concurrency` wins; else DAYONE_SYNC_CONCURRENCY; else the default. */
+function resolveConcurrency(opts: { concurrency?: number }): number {
+  if (opts.concurrency !== undefined) return Math.max(1, opts.concurrency);
+  const fromEnv = Number(process.env.DAYONE_SYNC_CONCURRENCY);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : DEFAULT_SYNC_CONCURRENCY;
+}
+
+/**
+ * Fetch + decrypt + map every ref in `toFetch` with bounded concurrency (a true
+ * worker pool, not fixed-size batches with a barrier between them) — the slowest
+ * entry in flight no longer stalls the rest of the pool's width. A per-entry
+ * failure (fetch or decrypt) is caught here and that entry is simply skipped;
+ * it must not fail the whole sync. Return order is completion order, not input
+ * order — callers must not depend on it (writes here are keyed by uuid).
+ */
+export async function fetchChangedEntries(
+  toFetch: readonly EntryRef[],
+  decrypt: (r: EntryRef) => Promise<string | null>,
+  concurrency: number,
+): Promise<{ mapped: DayOneEntry[]; done: EntryRef[] }> {
+  const mapped: DayOneEntry[] = [];
+  const done: EntryRef[] = [];
+  await runPool(toFetch, concurrency, async (r) => {
+    try {
+      const content = await decrypt(r);
+      if (content) {
+        mapped.push(mapEntry(JSON.parse(content), { editDate: r.editDate }));
+        done.push(r);
+      }
+    } catch {
+      // one bad entry must not fail the whole sync
+    }
+  });
+  return { mapped, done };
 }
 
 /** Run an incremental sync into the mirror. `nowIso` is injectable for testing. */
@@ -42,7 +81,7 @@ export async function sync(
   } = {},
 ): Promise<SyncResult> {
   const log = opts.onProgress ?? (() => {});
-  const concurrency = opts.concurrency ?? 8;
+  const concurrency = resolveConcurrency(opts);
   const reader = new RestReader(new DayOneApi(apiConfigFromEnv()), masterKey);
 
   const keys = await reader.unlockKeys();
@@ -93,26 +132,11 @@ export async function sync(
 
       // Changed: new or bumped revisionId → re-fetch + decrypt (bounded concurrency).
       const toFetch = refs.filter((r) => !r.deleted && stored.get(r.entryId) !== r.revisionId);
-      const mapped: DayOneEntry[] = [];
-      const done: EntryRef[] = [];
-      for (let i = 0; i < toFetch.length; i += concurrency) {
-        const batch = toFetch.slice(i, i + concurrency);
-        const results = await Promise.all(
-          batch.map(async (r) => {
-            try {
-              const content = await reader.decryptEntry(j.id, r.entryId, keys);
-              return content ? { r, e: mapEntry(JSON.parse(content), { editDate: r.editDate }) } : null;
-            } catch {
-              return null; // one bad entry must not fail the whole sync
-            }
-          }),
-        );
-        for (const x of results)
-          if (x) {
-            mapped.push(x.e);
-            done.push(x.r);
-          }
-      }
+      const { mapped, done } = await fetchChangedEntries(
+        toFetch,
+        (r) => reader.decryptEntry(j.id, r.entryId, keys),
+        concurrency,
+      );
       if (mapped.length) {
         importExport(db, { metadata: { version: "rest" }, entries: mapped }, name);
         db.transaction((rs: EntryRef[]) => {
