@@ -8,13 +8,28 @@
  *   daytwo doctor               check config + mirror health
  *   daytwo journals             list journals + counts + freshness
  *   daytwo search <q> [limit]   full-text search
+ *   daytwo list [filters]       structured browse (see flags below)
+ *   daytwo tags                 all tags with entry counts
  *   daytwo get <uuid>           one entry
  *   daytwo on-this-day [MM-DD]  entries for a month-day across years
+ *
+ * `list` filters (all optional, ANDed):
+ *   --journal <name> --tag <name> --starred --from <ISO> --to <ISO>
+ *   --place <substr> --limit <n> --offset <n>
  */
 
 import { existsSync } from "node:fs";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
-import { getEntry, getSyncedAt, listJournals, onThisDay, searchEntries } from "./queries.ts";
+import {
+  getEntry,
+  getSyncedAt,
+  type ListFilters,
+  listEntries,
+  listJournals,
+  listTags,
+  onThisDay,
+  searchEntries,
+} from "./queries.ts";
 
 function out(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -29,6 +44,44 @@ function requireMirror() {
     process.exit(2);
   }
   return openMirror();
+}
+
+/** Parse `--key value` / `--flag` pairs into the listEntries filter shape. */
+function parseListFilters(argv: string[]): ListFilters {
+  const f: ListFilters = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case "--journal":
+        f.journal = argv[++i];
+        break;
+      case "--tag":
+        f.tag = argv[++i];
+        break;
+      case "--starred":
+        f.starred = true;
+        break;
+      case "--from":
+        f.from = argv[++i];
+        break;
+      case "--to":
+        f.to = argv[++i];
+        break;
+      case "--place":
+        f.place = argv[++i];
+        break;
+      case "--limit":
+        f.limit = Number(argv[++i]);
+        break;
+      case "--offset":
+        f.offset = Number(argv[++i]);
+        break;
+      default:
+        console.error(`unknown flag for list: ${a}`);
+        process.exit(1);
+    }
+  }
+  return f;
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -96,6 +149,20 @@ switch (cmd) {
     break;
   }
 
+  case "list": {
+    const db = requireMirror();
+    out({ synced_at: getSyncedAt(db), results: listEntries(db, parseListFilters(rest)) });
+    db.close();
+    break;
+  }
+
+  case "tags": {
+    const db = requireMirror();
+    out({ synced_at: getSyncedAt(db), tags: listTags(db) });
+    db.close();
+    break;
+  }
+
   case "on-this-day": {
     const db = requireMirror();
     out({ synced_at: getSyncedAt(db), results: onThisDay(db, rest[0] ?? todayMonthDay()) });
@@ -105,7 +172,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | mcp | doctor | journals | search <q> [limit] | get <uuid> | on-this-day [MM-DD]",
+      "commands: sync | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }
