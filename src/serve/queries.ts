@@ -5,11 +5,39 @@
  */
 
 import type { Database } from "bun:sqlite";
+import { isMediaCached, MEDIA_DIR, mediaCachePath } from "../media-cache.ts";
 
 export interface JournalRow {
   id: number;
   name: string;
   entries: number;
+}
+
+export interface MediaFile {
+  identifier: string;
+  md5: string | null;
+  kind: string; // photo | video | audio | pdf
+  type: string | null;
+  /** True if the decrypted bytes are in the local cache (populated by media-fetch). */
+  cached: boolean;
+  /** Local path to the cached bytes, or null if not cached. */
+  path: string | null;
+}
+
+/**
+ * Resolve a media identifier to its cached bytes, if present. Pure serving: it
+ * reads the mirror's media metadata and checks the local content-addressed cache
+ * (keyed by the plaintext md5) — no Day One, no crypto, no fetching. Returns null
+ * for an unknown identifier; `cached: false` when the metadata exists but the
+ * bytes have not been fetched yet (run `daytwo media-fetch`).
+ */
+export function resolveMedia(db: Database, identifier: string, dir: string = MEDIA_DIR): MediaFile | null {
+  const row = db
+    .query("SELECT identifier, md5, kind, type FROM media WHERE identifier = ?")
+    .get(identifier) as Omit<MediaFile, "cached" | "path"> | null;
+  if (!row) return null;
+  const cached = row.md5 ? isMediaCached(row.md5, dir) : false;
+  return { ...row, cached, path: cached && row.md5 ? mediaCachePath(row.md5, dir) : null };
 }
 
 export interface EntrySummary {
