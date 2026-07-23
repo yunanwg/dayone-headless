@@ -1,0 +1,23 @@
+# Keep SHA-pinned GitHub Actions (and the Bun toolchain deps) current, so pinning
+# for supply-chain safety doesn't mean running stale, unpatched actions.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm # covers the Bun project (package.json / bun.lock)
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      deps:
+        patterns: ["*"]
