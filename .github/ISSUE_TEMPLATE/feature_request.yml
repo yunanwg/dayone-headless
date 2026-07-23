@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Heads up on scope: this is a **read-only** client by design — there are
+        no write paths back to Day One, and a Mac / the desktop app is never a
+        dependency. Requests that need either are out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do that's awkward or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to see. Sketches / API shapes welcome.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
