@@ -74,16 +74,24 @@ function buildServer(): McpServer {
     "search_entries",
     {
       description:
-        "Full-text search over entry bodies. Returns matches (uuid, date, place, snippet), " +
-        "highest-ranked first. Call get_entry with a uuid for the full entry.",
+        "Full-text search over entry bodies, highest-ranked first. Optionally narrow with the " +
+        "same filters as list_entries (journal / tag / date range / place / starred) — e.g. " +
+        "'coffee' in 2021 in journal Trips. Returns uuid, date, place, snippet; call get_entry for full content.",
       inputSchema: {
         query: z.string().describe("FTS5 query, e.g. 'paris coffee' or 'trip NOT work'"),
+        journal: z.string().optional().describe("exact journal name (see list_journals)"),
+        tag: z.string().optional().describe("exact tag name (see list_tags)"),
+        starred: z.boolean().optional().describe("only starred entries when true"),
+        from: z.string().optional().describe("inclusive lower bound on date, ISO-8601 (e.g. 2023-01-01)"),
+        to: z.string().optional().describe("inclusive upper bound; a bare YYYY-MM-DD covers the whole day"),
+        place: z.string().optional().describe("case-insensitive substring of place / locality / country"),
         limit: z.number().int().min(1).max(100).default(25).describe("max results (default 25)"),
+        offset: z.number().int().min(0).default(0).describe("skip N results, for paging (default 0)"),
       },
       annotations: READ_ONLY,
     },
-    async ({ query, limit }) =>
-      json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, limit) }),
+    async ({ query, ...filters }) =>
+      json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) }),
   );
 
   server.registerTool(

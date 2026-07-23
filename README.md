@@ -93,7 +93,7 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo mcp` | Run the read-only MCP server. stdio by default; streamable-HTTP if `DAYONE_MCP_PORT` is set. |
 | `daytwo doctor` | Config + mirror health self-check (reports secret *presence/shape*, never values). |
 | `daytwo journals` | List journals with entry counts and freshness. |
-| `daytwo search <q> [limit]` | Full-text search over entry bodies. |
+| `daytwo search <q> [limit] [filters]` | Full-text search, optionally narrowed by the `list` filters. |
 | `daytwo list [filters]` | Structured browse — filter/paginate without a text query. |
 | `daytwo tags` | All tags with entry counts, most-used first. |
 | `daytwo get <uuid>` | One entry's full content + metadata. |
@@ -110,6 +110,12 @@ daytwo list --journal <name> --tag <name> --starred \
 `--from`/`--to` bound `creation_date` (both inclusive; a bare `YYYY-MM-DD` `--to`
 covers the whole day). `--place` is a case-insensitive substring over place /
 locality / country. Newest first; page with `--limit`/`--offset`.
+
+The same flags narrow `search`, so keyword and structure compose:
+
+```
+daytwo search "coffee" --from 2021-01-01 --to 2021-12-31 --journal Trips
+```
 
 Run via `bun run src/serve/cli.ts <cmd>`, the `daytwo` bin, or the package
 scripts: `bun run sync | mcp | cli | import | check | lint | format | typecheck | test`.
@@ -142,7 +148,8 @@ Tools exposed (all read-only; media is returned as metadata only, never bytes):
 
 - `list_journals` — journals + entry counts + `synced_at`.
 - `list_tags` — every tag with its entry count, most-used first.
-- `search_entries` — FTS5 query over bodies; returns uuid, date, place, snippet.
+- `search_entries` — FTS5 query over bodies, optionally narrowed by the same
+  filters as `list_entries`; returns uuid, date, place, snippet.
 - `list_entries` — structured browse: filter by journal / tag / date range /
   place / starred, newest first, paginated. The complement to `search_entries`.
 - `get_entry` — full entry by uuid.

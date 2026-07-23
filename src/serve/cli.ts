@@ -137,14 +137,18 @@ switch (cmd) {
   case "search": {
     const query = rest[0];
     if (!query) {
-      console.error("usage: daytwo search <query> [limit]");
+      console.error("usage: daytwo search <query> [limit] [filters]");
       process.exit(1);
     }
+    // Legacy positional limit (`search <q> 10`) still works; the same --flags as
+    // `list` narrow the search, and --limit overrides a positional if both given.
+    const after = rest.slice(1);
+    const filters: ListFilters = {};
+    const rangeArgs = after[0] !== undefined && /^\d+$/.test(after[0]) ? after.slice(1) : after;
+    if (after[0] !== undefined && /^\d+$/.test(after[0])) filters.limit = Number(after[0]);
+    Object.assign(filters, parseListFilters(rangeArgs));
     const db = requireMirror();
-    out({
-      synced_at: getSyncedAt(db),
-      results: searchEntries(db, query, rest[1] ? Number(rest[1]) : undefined),
-    });
+    out({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) });
     db.close();
     break;
   }
