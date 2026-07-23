@@ -11,6 +11,7 @@
  *   daytwo list [filters]       structured browse (see flags below)
  *   daytwo tags                 all tags with entry counts
  *   daytwo get <uuid>           one entry
+ *   daytwo media <uuid>         media metadata attached to an entry
  *   daytwo on-this-day [MM-DD]  entries for a month-day across years
  *
  * `list` filters (all optional, ANDed):
@@ -22,6 +23,7 @@ import { existsSync } from "node:fs";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import {
   getEntry,
+  getEntryMedia,
   getSyncedAt,
   type ListFilters,
   listEntries,
@@ -167,6 +169,18 @@ switch (cmd) {
     break;
   }
 
+  case "media": {
+    const uuid = rest[0];
+    if (!uuid) {
+      console.error("usage: daytwo media <uuid>");
+      process.exit(1);
+    }
+    const db = requireMirror();
+    out({ synced_at: getSyncedAt(db), media: getEntryMedia(db, uuid) });
+    db.close();
+    break;
+  }
+
   case "on-this-day": {
     const db = requireMirror();
     out({ synced_at: getSyncedAt(db), results: onThisDay(db, rest[0] ?? todayMonthDay()) });
@@ -176,7 +190,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | on-this-day [MM-DD]",
+      "commands: sync | mcp | doctor | journals | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }

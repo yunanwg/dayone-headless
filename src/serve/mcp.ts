@@ -18,6 +18,7 @@ import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import {
   getEntry,
+  getEntryMedia,
   getSyncedAt,
   listEntries,
   listJournals,
@@ -131,7 +132,9 @@ function buildServer(): McpServer {
   server.registerTool(
     "get_entry",
     {
-      description: "Get one entry's full content + metadata by uuid (media is metadata-only).",
+      description:
+        "Get one entry's full content + metadata by uuid. For the entry's attached " +
+        "media use get_entry_media (this returns the entry body, not media bytes).",
       inputSchema: { uuid: z.string().describe("entry uuid from search_entries / on_this_day") },
       annotations: READ_ONLY,
     },
@@ -141,6 +144,20 @@ function buildServer(): McpServer {
         ? json(entry)
         : { content: [{ type: "text" as const, text: `no entry: ${uuid}` }], isError: true };
     },
+  );
+
+  server.registerTool(
+    "get_entry_media",
+    {
+      description:
+        "List the media attached to an entry as METADATA ONLY (identifier, kind, md5, type, " +
+        "order) — never the photo/video/audio/pdf bytes. Empty for an entry with no attachments.",
+      inputSchema: {
+        uuid: z.string().describe("entry uuid from search_entries / list_entries / on_this_day"),
+      },
+      annotations: READ_ONLY,
+    },
+    async ({ uuid }) => json({ synced_at: getSyncedAt(db), media: getEntryMedia(db, uuid) }),
   );
 
   server.registerTool(
