@@ -28,8 +28,9 @@ mirror.db-*
 data/
 exports/
 *.dayone-export.json
-# DevTools/CDP recon scratch: HAR, logged key/iv/plaintext (inline comments are
-# NOT valid in .gitignore — keep this on its own line).
+# Local scratch dir (never commit its contents; keep the pattern on its own line —
+# inline comments are NOT valid in .gitignore).
+scratch/
 recon/
 
 # === Node / TS ===

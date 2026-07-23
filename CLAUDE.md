@@ -29,9 +29,9 @@ decoupling has leaked — stop and fix the boundary.
 
 ## Build order (see README roadmap)
 
-1. **Phase 0 recon** — DevTools/CDP against the live web app: auth chain, entry
-   endpoints, `crypto.subtle.*` call inputs. Decides how hard the pure-REST path
-   is. **The real unknown is auth anti-automation — probe it first.**
+1. **Phase 0 — protocol study.** Understand the web app's auth chain, entry
+   endpoints, and `crypto.subtle.*` inputs to gauge how hard the pure-REST path
+   is. Auth is the main unknown.
 2. **Phase 1** — serving layer against a manual JSON export. Zero risk.
 3. **Phase 2** — browser ingestion (drives the web app).
 4. **Phase 3** — REST ingestion, built under the browser ingester as oracle +
@@ -44,7 +44,7 @@ from Day One but one hand-exported JSON file.
 
 - **Secrets never touch git or logs.** Master key, session/refresh tokens, browser
   profiles, the mirror DB, exported JSON — all git-ignored. Never print key/iv/
-  plaintext outside a local, gitignored recon scratch dir.
+  plaintext outside a local, gitignored scratch dir.
 - **Read-only.** No write paths until read is done and explicitly re-scoped.
 - **No Mac / Day One desktop dependency**, ever. That's the whole point.
 - Toolchain: **pnpm** / **bun**, never npm/yarn. English for code, comments,
@@ -63,12 +63,9 @@ committed** — so they are a leak surface too. Two rules:
   by `scripts/redact-export.ts` from a gitignored real export; the redactor is
   Unicode-aware (redacts CJK/accented text, not just ASCII) and default-denies
   unmodeled string leaves. The real export never enters git.
-- **Before any public open-sourcing, start git history fresh.** Even redacted or
-  synthetic-looking data — and schema/field shapes derived from real entries —
-  accumulate across dev-stage commits. Treat the current history as
-  **private-only**: squash to a single clean initial commit (or re-init the repo)
-  and audit the tree for stray tokens before pushing anywhere public. Do not rely
-  on "it was redacted at the time."
+- **Keep account-derived specifics out of committed docs too** — real entry/media
+  counts, per-journal sizes, place names. Describe shapes and mappings generically;
+  use synthetic numbers in examples.
 
 ## Verifying crypto (REST ingester)
 

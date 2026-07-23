@@ -15,9 +15,8 @@ To sync + decrypt, the process needs, from the environment:
 - **`DAYONE_EMAIL` + `DAYONE_PASSWORD`** (or a `DAYONE_API_TOKEN`) — account auth
   used only to mint the short-lived API token.
 
-The **mirror** (`mirror.db`) contains your decrypted entry text + metadata. The
-**device profile** used by the browser ingester (dev only) contains a live session
-and decrypted cache. Both are as sensitive as the journal itself.
+The **mirror** (`data/mirror.db`) contains your decrypted entry text + metadata,
+and is as sensitive as the journal itself.
 
 ## Rules the code follows
 
@@ -25,9 +24,9 @@ and decrypted cache. Both are as sensitive as the journal itself.
   **never logged, printed, or written to disk** (only the derived plaintext mirror
   is persisted, by design). `dayone doctor` reports the *presence/shape* of secrets,
   never their values.
-- **Everything sensitive is gitignored**: `.env`, `mirror.db*`, `recon/`,
-  `profile*/`, `exports/`, `data/`, `*.sqlite`. Secret scanning (gitleaks) runs in
-  CI and pre-commit so a key can't be committed by accident.
+- **Everything sensitive is gitignored** — your `.env`, the decrypted mirror, and
+  any exports never enter git. Secret scanning (gitleaks) runs in CI and pre-commit
+  so a key can't be committed by accident.
 - **Read-only.** There are no write paths to Day One.
 - **Media bytes are never mirrored** — only metadata; blobs are fetched + decrypted
   on demand.

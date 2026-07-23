@@ -84,7 +84,7 @@ unrelated id spaces.
 Tests and fixtures must contain **no real journal content and no secrets** — use
 synthetic data, generated keys, and placeholder journal names (e.g. `J1`–`J4`,
 `Personal`, `Work`). Anything sensitive (`.env`, `mirror.db*`, exports, browser
-`profile*/`, recon scratch) is git-ignored, and gitleaks will block an accidental
+`profile*/`) is git-ignored, and gitleaks will block an accidental
 key commit — but the first line of defense is not putting real data in the repo.
 
 ## Commit & PR conventions
