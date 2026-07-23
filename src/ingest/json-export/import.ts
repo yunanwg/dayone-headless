@@ -11,6 +11,7 @@
 
 import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
+import { isValidMd5 } from "../../media-cache.ts";
 import { openMirror } from "../../serve/db/open.ts";
 import type { DayOneEntry, DayOneExport, DayOneMedia } from "../../types.ts";
 
@@ -123,7 +124,7 @@ export function importExport(db: Database, data: DayOneExport, journalName: stri
             $identifier: m.identifier,
             $entry_uuid: e.uuid,
             $kind: kind,
-            $md5: m.md5 ?? null,
+            $md5: isValidMd5(m.md5) ? m.md5 : null,
             $type: m.type ?? null,
             $order_in_entry: m.orderInEntry ?? null,
             $raw: JSON.stringify(m),

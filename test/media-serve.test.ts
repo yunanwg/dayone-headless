@@ -14,7 +14,7 @@ import { openMirror } from "../src/serve/db/open.ts";
 import { resolveMedia } from "../src/serve/queries.ts";
 import type { DayOneExport } from "../src/types.ts";
 
-// One entry with one photo (identifier PHOTO-1, md5 "cafebabe").
+// One entry with one photo (identifier PHOTO-1, md5 "cafebabecafebabecafebabecafebabe").
 const fixture = {
   metadata: { version: "1.0" },
   entries: [
@@ -22,7 +22,9 @@ const fixture = {
       uuid: "M1",
       creationDate: "2024-01-01T00:00:00Z",
       text: "has a photo",
-      photos: [{ identifier: "PHOTO-1", md5: "cafebabe", type: "jpeg", orderInEntry: 0 }],
+      photos: [
+        { identifier: "PHOTO-1", md5: "cafebabecafebabecafebabecafebabe", type: "jpeg", orderInEntry: 0 },
+      ],
     },
   ],
 } as DayOneExport;
@@ -42,14 +44,19 @@ test("resolveMedia returns null for an unknown identifier", () => {
 test("resolveMedia reports not-cached when bytes are absent", () => {
   const m = resolveMedia(db, "PHOTO-1", cacheDir);
   expect(m).not.toBeNull();
-  expect(m).toMatchObject({ identifier: "PHOTO-1", md5: "cafebabe", kind: "photo", type: "jpeg" });
+  expect(m).toMatchObject({
+    identifier: "PHOTO-1",
+    md5: "cafebabecafebabecafebabecafebabe",
+    kind: "photo",
+    type: "jpeg",
+  });
   expect(m!.cached).toBe(false);
   expect(m!.path).toBeNull();
 });
 
 test("resolveMedia reports cached + path once bytes exist", async () => {
-  await Bun.write(prepareMediaPath("cafebabe", cacheDir), new Uint8Array([1, 2, 3]));
+  await Bun.write(prepareMediaPath("cafebabecafebabecafebabecafebabe", cacheDir), new Uint8Array([1, 2, 3]));
   const m = resolveMedia(db, "PHOTO-1", cacheDir);
   expect(m!.cached).toBe(true);
-  expect(m!.path).toBe(join(cacheDir, "cafebabe"));
+  expect(m!.path).toBe(join(cacheDir, "cafebabecafebabecafebabecafebabe"));
 });

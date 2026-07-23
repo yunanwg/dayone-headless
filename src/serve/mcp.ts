@@ -17,10 +17,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
+import { checkHttpGate, httpGateConfigFromEnv } from "./http-auth.ts";
 import {
   getEntry,
   getEntryMedia,
   getSyncedAt,
+  InvalidSearchQueryError,
   listEntries,
   listJournals,
   listTags,
@@ -103,8 +105,26 @@ function buildServer(): McpServer {
       },
       annotations: READ_ONLY,
     },
-    async ({ query, ...filters }) =>
-      json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) }),
+    async ({ query, ...filters }) => {
+      try {
+        return json({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) });
+      } catch (err) {
+        if (err instanceof InvalidSearchQueryError) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `${err.message}\n\nExamples: 'paris coffee' (all terms), '"exact phrase"', ` +
+                  `'trip NOT work', 'run*' (prefix).`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        throw err;
+      }
+    },
   );
 
   server.registerTool(
@@ -242,10 +262,18 @@ if (port) {
       ? body.some((m) => (m as { method?: string })?.method === "initialize")
       : (body as { method?: string })?.method === "initialize";
 
+  // Defense-in-depth: optional bearer-token auth + origin allowlist (see http-auth.ts).
+  const gate = httpGateConfigFromEnv();
+
   Bun.serve({
     port: Number(port),
-    hostname: process.env.DAYONE_MCP_HOST ?? "0.0.0.0",
+    // Default to loopback; the proxy/tunnel in front handles remote exposure. In
+    // Docker the published-port bind needs 0.0.0.0 — compose sets DAYONE_MCP_HOST.
+    hostname: process.env.DAYONE_MCP_HOST ?? "127.0.0.1",
     fetch: async (req) => {
+      const gated = checkHttpGate(req, gate);
+      if (gated) return gated;
+
       const sid = req.headers.get("mcp-session-id");
       const existing = sid ? transports.get(sid) : undefined;
       if (existing) return existing.handleRequest(req);

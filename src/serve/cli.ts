@@ -27,6 +27,7 @@ import {
   getEntry,
   getEntryMedia,
   getSyncedAt,
+  InvalidSearchQueryError,
   type ListFilters,
   listEntries,
   listJournals,
@@ -170,7 +171,16 @@ switch (cmd) {
     if (after[0] !== undefined && /^\d+$/.test(after[0])) filters.limit = Number(after[0]);
     Object.assign(filters, parseListFilters(rangeArgs));
     const db = requireMirror();
-    out({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) });
+    try {
+      out({ synced_at: getSyncedAt(db), results: searchEntries(db, query, filters) });
+    } catch (err) {
+      if (err instanceof InvalidSearchQueryError) {
+        console.error(err.message);
+        db.close();
+        process.exit(2);
+      }
+      throw err;
+    }
     db.close();
     break;
   }

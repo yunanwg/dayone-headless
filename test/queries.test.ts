@@ -10,6 +10,7 @@ import { openMirror } from "../src/serve/db/open.ts";
 import {
   getEntry,
   getEntryMedia,
+  InvalidSearchQueryError,
   listEntries,
   listJournals,
   listTags,
@@ -67,7 +68,7 @@ test("getEntryMedia returns attached media metadata, [] when none", () => {
   expect(media[0]).toEqual({
     identifier: "PHOTO-ID-1",
     kind: "photo",
-    md5: "abc123",
+    md5: "0123456789abcdef0123456789abcdef",
     type: "jpeg",
     order_in_entry: 0,
   });
@@ -197,4 +198,54 @@ test("listTags counts entries per tag, most-used first", () => {
   expect(tags.find((t) => t.name === "paris")!.entries).toBe(1);
   // 'code' (2) must rank before any 1-count tag.
   expect(tags[0]!.name).toBe("code");
+});
+
+test("searchEntries surfaces a malformed FTS5 query as a typed error", () => {
+  // Unbalanced quote / dangling operator are FTS5 syntax errors, not DB faults.
+  expect(() => searchEntries(db, '"unbalanced')).toThrow(InvalidSearchQueryError);
+  expect(() => searchEntries(db, "foo AND")).toThrow(InvalidSearchQueryError);
+  expect(() => searchEntries(db, '"unbalanced')).toThrow(/FTS5 syntax/);
+  // A well-formed query still returns normally (no false positives).
+  expect(() => searchEntries(db, "Paris")).not.toThrow();
+});
+
+test("place filter escapes LIKE wildcards, matching them literally", () => {
+  // A dedicated DB so these wildcard-bearing places don't perturb the shared-db
+  // assertions above.
+  const wdb = openMirror(":memory:", { writable: true });
+  const wild = {
+    metadata: { version: "1.0" },
+    entries: [
+      {
+        uuid: "WILD000000000000000000000000PCT1",
+        creationDate: "2020-03-01T00:00:00Z",
+        timeZone: "UTC",
+        text: "percent place",
+        location: { placeName: "50% off" },
+      },
+      {
+        uuid: "WILD000000000000000000000000UND1",
+        creationDate: "2020-03-02T00:00:00Z",
+        timeZone: "UTC",
+        text: "underscore place",
+        location: { placeName: "a_b" },
+      },
+      {
+        uuid: "WILD000000000000000000000000PLN1",
+        creationDate: "2020-03-03T00:00:00Z",
+        timeZone: "UTC",
+        text: "plain place",
+        location: { placeName: "xyz" },
+      },
+    ],
+  } as DayOneExport;
+  importExport(wdb, wild, "wild");
+
+  // '%' is escaped → matches only the literal "50% off", not every row.
+  expect(listEntries(wdb, { place: "%" }).map((e) => e.uuid)).toEqual(["WILD000000000000000000000000PCT1"]);
+  // '_' is escaped → matches only the literal "a_b", not any single char.
+  expect(listEntries(wdb, { place: "_" }).map((e) => e.uuid)).toEqual(["WILD000000000000000000000000UND1"]);
+  // A normal substring still works.
+  expect(listEntries(wdb, { place: "xy" }).map((e) => e.uuid)).toEqual(["WILD000000000000000000000000PLN1"]);
+  wdb.close();
 });

@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { isMediaCached, prepareMediaPath } from "../../media-cache.ts";
+import { isMediaCached, isValidMd5, prepareMediaPath } from "../../media-cache.ts";
 import { openMirror } from "../../serve/db/open.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { runPool } from "./pool.ts";
@@ -99,7 +99,10 @@ export async function runMediaJobs(
   // the bounded-concurrency pool below.
   const eligible: (MediaJob & { md5: string })[] = [];
   for (const job of jobs) {
-    if (!job.md5) {
+    // A missing OR malformed md5 (not 32 lowercase hex) is skipped up front: the
+    // md5 is both the verification target and the cache path, so a bad value can
+    // never verify and must never reach `prepareMediaPath` (path-traversal guard).
+    if (!isValidMd5(job.md5)) {
       stats.skippedNoMd5++;
       continue;
     }
