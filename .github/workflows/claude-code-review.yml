@@ -25,8 +25,11 @@ concurrency:
 
 jobs:
   claude-review:
-    # Don't review drafts; wait until the PR is marked ready.
-    if: github.event.pull_request.draft == false
+    # Skip drafts, and don't spend tokens reviewing Dependabot's bumps (the action
+    # also refuses to run for bot actors, which would just fail the job).
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -47,6 +50,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }} # auto-scoped token, not a PAT
+          # Pin the model — the default picks the most capable (priciest) one, and
+          # automated reviews run often. Sonnet 5 is the cost/quality sweet spot.
+          claude_args: '--model claude-sonnet-5'
           # This repo decrypts a private journal — keep file contents out of logs.
           show_full_output: false
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'

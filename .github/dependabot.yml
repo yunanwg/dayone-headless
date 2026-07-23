@@ -1,5 +1,9 @@
-# Keep SHA-pinned GitHub Actions (and the Bun toolchain deps) current, so pinning
-# for supply-chain safety doesn't mean running stale, unpatched actions.
+# Keep SHA-pinned GitHub Actions current, so pinning for supply-chain safety
+# doesn't mean running stale, unpatched actions.
+#
+# Note: no `npm` ecosystem here on purpose — Dependabot updates package.json but
+# does not keep Bun's `bun.lock` in sync, which breaks `bun install --frozen-
+# lockfile` in CI. Bump JS deps manually with `bun update`.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -10,14 +14,4 @@ updates:
       prefix: ci
     groups:
       actions:
-        patterns: ["*"]
-
-  - package-ecosystem: npm # covers the Bun project (package.json / bun.lock)
-    directory: /
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: chore
-    groups:
-      deps:
         patterns: ["*"]

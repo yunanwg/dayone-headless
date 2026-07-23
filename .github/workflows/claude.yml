@@ -63,5 +63,7 @@ jobs:
           additional_permissions: |
             actions: read
 
-          # Optional: pin a model, or restrict tools, e.g.
-          # claude_args: '--allowedTools "Bash(bun *),Bash(gh pr *)"'
+          # Pin the model — the default picks the most capable (priciest) one.
+          # Sonnet 5 is the cost/quality sweet spot; bump per-invocation if a task
+          # genuinely needs more (e.g. append --model to a follow-up @claude).
+          claude_args: '--model claude-sonnet-5'
