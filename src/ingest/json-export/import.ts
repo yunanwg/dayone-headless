@@ -13,6 +13,12 @@ import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
 import { isValidMd5 } from "../../media-cache.ts";
 import { openMirror } from "../../serve/db/open.ts";
+import {
+  assertSyncAttempt,
+  recordSyncOutcome,
+  recordSyncStart,
+  StaleSyncAttemptError,
+} from "../../sync-status.ts";
 import type { DayOneEntry, DayOneExport, DayOneMedia } from "../../types.ts";
 
 interface ImportStats {
@@ -22,6 +28,11 @@ interface ImportStats {
   tags: number;
 }
 
+/**
+ * Low-level mirror mutation used inside an ingestion attempt. Production
+ * entrypoints must call recordSyncStart first and guard this call in the same
+ * transaction with assertSyncAttempt; REST deliberately invokes it per journal.
+ */
 export function importExport(db: Database, data: DayOneExport, journalName: string): ImportStats {
   const insertJournal = db.query(
     `INSERT INTO journal (name, export_version) VALUES (?, ?)
@@ -188,8 +199,39 @@ if (import.meta.main) {
   const journalName = journalArg ?? basename(file).replace(/\.json$/i, "");
   const data = (await Bun.file(file).json()) as DayOneExport;
   const db = openMirror(undefined, { writable: true });
-  const stats = importExport(db, data, journalName);
-  db.close();
+  const attemptedAt = new Date().toISOString();
+  let attempt: ReturnType<typeof recordSyncStart> | undefined;
+  let stats: ImportStats;
+  try {
+    attempt = recordSyncStart(db, attemptedAt, "json-export");
+    const generation = attempt.sync_generation;
+    stats = db
+      .transaction(() => {
+        assertSyncAttempt(db, generation);
+        return importExport(db, data, journalName);
+      })
+      .immediate();
+    recordSyncOutcome(
+      db,
+      { status: "complete", attemptedAt, failedEntries: 0, source: "json-export" },
+      generation,
+    );
+  } catch (error) {
+    if (attempt) {
+      try {
+        recordSyncOutcome(
+          db,
+          { status: "failed", attemptedAt, failedEntries: 0, source: "json-export" },
+          attempt.sync_generation,
+        );
+      } catch (outcomeError) {
+        if (!(outcomeError instanceof StaleSyncAttemptError)) throw outcomeError;
+      }
+    }
+    throw error;
+  } finally {
+    db.close();
+  }
   console.error(
     `imported "${stats.journal}": ${stats.entries} entries, ${stats.media} media, ${stats.tags} tags`,
   );

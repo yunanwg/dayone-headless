@@ -3,6 +3,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { EntryRef } from "../src/ingest/rest/reader.ts";
 import { sync } from "../src/ingest/rest/sync.ts";
 import { openMirror } from "../src/serve/db/open.ts";
@@ -104,6 +105,7 @@ test("complete → degraded preserves the last complete timestamp, then a retry 
       last_attempt_at: "2026-01-02T00:00:00.000Z",
       last_complete_at: "2026-01-01T00:00:00.000Z",
       failed_entries: 1,
+      sync_generation: 2,
     });
     expect(getFreshness(db).synced_at).toBe("2026-01-01T00:00:00.000Z");
   });
@@ -125,6 +127,7 @@ test("complete → degraded preserves the last complete timestamp, then a retry 
       last_attempt_at: "2026-01-03T00:00:00.000Z",
       last_complete_at: "2026-01-03T00:00:00.000Z",
       failed_entries: 0,
+      sync_generation: 3,
     });
   });
 });
@@ -154,6 +157,7 @@ test("a first degraded attempt has no complete freshness timestamp", async () =>
         last_attempt_at: "2026-02-01T00:00:00.000Z",
         last_complete_at: null,
         failed_entries: 1,
+        sync_generation: 1,
       },
     });
   });
@@ -167,6 +171,7 @@ test("a legacy synced_at-only mirror is reported as complete", () => {
     last_attempt_at: "2025-12-31T00:00:00.000Z",
     last_complete_at: "2025-12-31T00:00:00.000Z",
     failed_entries: 0,
+    sync_generation: 0,
   });
   db.close();
 });
@@ -181,6 +186,7 @@ test("a first running attempt is visible without claiming a complete snapshot", 
       last_attempt_at: "2026-03-01T00:00:00.000Z",
       last_complete_at: null,
       failed_entries: 0,
+      sync_generation: 1,
     },
   });
   db.close();
@@ -233,6 +239,7 @@ test("an in-flight sync is readable as running while preserving the previous com
           last_attempt_at: "2026-03-02T00:00:00.000Z",
           last_complete_at: "2026-03-01T00:00:00.000Z",
           failed_entries: 0,
+          sync_generation: 1,
         },
       });
     });
@@ -243,4 +250,98 @@ test("an in-flight sync is readable as running while preserving the previous com
   const completed = await inFlight;
   expect(completed.status).toBe("complete");
   expect(completed.syncedAt).toBe("2026-03-02T00:00:00.000Z");
+});
+
+test("an overlapping newer REST sync prevents the stale attempt from writing or finalizing", async () => {
+  const path = mirrorPath();
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let reportFirstStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    reportFirstStarted = resolve;
+  });
+  const firstBase = fakeReader(
+    () => [ref("STALE-ENTRY", "r1")],
+    async (entryId) => content(entryId),
+  );
+  const firstReader = {
+    ...firstBase,
+    unlockKeys: async () => {
+      reportFirstStarted();
+      await firstGate;
+      return firstBase.unlockKeys();
+    },
+  };
+  const newerReader = fakeReader(
+    () => [],
+    async (entryId) => content(entryId),
+  );
+
+  const stale = sync("synthetic-key", {
+    mirrorPath: path,
+    nowIso: "2026-04-01T00:00:00.000Z",
+    reader: firstReader,
+  });
+  await firstStarted;
+  const newer = await sync("synthetic-key", {
+    mirrorPath: path,
+    nowIso: "2026-04-02T00:00:00.000Z",
+    reader: newerReader,
+  });
+  expect(newer.status).toBe("complete");
+  releaseFirst();
+  await expect(stale).rejects.toThrow(/stale sync attempt/);
+
+  readMirror(path, (db) => {
+    expect(db.query("SELECT COUNT(*) AS n FROM entry WHERE uuid = 'STALE-ENTRY'").get()).toEqual({
+      n: 0,
+    });
+    expect(getSyncStatus(db)).toMatchObject({
+      status: "complete",
+      last_attempt_at: "2026-04-02T00:00:00.000Z",
+      sync_generation: 2,
+    });
+  });
+});
+
+test("simultaneous starts from independent processes all claim a unique generation", async () => {
+  const path = mirrorPath();
+  const initialized = openMirror(path, { writable: true });
+  initialized.close();
+  const openModule = pathToFileURL(join(import.meta.dir, "../src/serve/db/open.ts")).href;
+  const statusModule = pathToFileURL(join(import.meta.dir, "../src/sync-status.ts")).href;
+  const worker = `
+    import { openMirror } from ${JSON.stringify(openModule)};
+    import { recordSyncStart } from ${JSON.stringify(statusModule)};
+    const db = openMirror(process.argv[1], { writable: true });
+    try {
+      const status = recordSyncStart(db, new Date().toISOString(), "concurrency-test");
+      console.log(status.sync_generation);
+    } finally {
+      db.close();
+    }
+  `;
+  const processes = Array.from({ length: 12 }, () =>
+    Bun.spawn([process.execPath, "-e", worker, path], {
+      stdout: "pipe",
+      stderr: "pipe",
+    }),
+  );
+  const results = await Promise.all(
+    processes.map(async (process) => ({
+      exitCode: await process.exited,
+      stdout: await new Response(process.stdout).text(),
+      stderr: await new Response(process.stderr).text(),
+    })),
+  );
+  expect(results.map((result) => result.exitCode)).toEqual(Array(12).fill(0));
+  expect(results.map((result) => Number(result.stdout.trim())).sort((a, b) => a - b)).toEqual(
+    Array.from({ length: 12 }, (_, index) => index + 1),
+  );
+  expect(results.map((result) => result.stderr).join("")).toBe("");
+  readMirror(path, (db) => {
+    expect(getSyncStatus(db).sync_generation).toBe(12);
+  });
 });

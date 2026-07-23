@@ -586,7 +586,7 @@ export function getEntryMedia(db: Database, uuid: string): MediaMeta[] {
  * joined to `journal j`. Used by both listEntries and searchEntries so the two
  * surfaces filter identically; the caller owns MATCH, ORDER BY, and pagination.
  */
-function entryFilterClauses(filters: ListFilters): {
+export function entryFilterClauses(filters: ListFilters): {
   clauses: string[];
   params: Record<string, string | number>;
 } {
