@@ -11,6 +11,7 @@
 import type { DayOneApi } from "./api.ts";
 import { rsaUnwrap } from "./crypto.ts";
 import {
+  decryptAttachment,
   decryptD1PrivateKey,
   decryptD1Symmetric,
   decryptEntryContent,
@@ -120,6 +121,18 @@ export class RestReader {
       deleted: !!f.revision.deletionRequested,
       editDate: f.revision.editDate,
     }));
+  }
+
+  /**
+   * Fetch + decrypt one attachment's bytes (photo/video/audio/pdf) given its
+   * journal id and media `identifier`. Returns the original file bytes.
+   */
+  async fetchMedia(journalId: string, identifier: string, keys: JournalKeys): Promise<Uint8Array> {
+    const blob = await this.api.getAttachment(journalId, identifier);
+    const d = parseD1(blob);
+    const jp = d.fingerprint ? keys.journalPrivByFingerprint.get(hex(d.fingerprint)) : undefined;
+    if (!jp) throw new Error(`no journal key for attachment ${identifier}`);
+    return decryptAttachment(jp, blob);
   }
 
   /** Fetch + decrypt one entry's content (UTF-8 JSON string), or null if its key is unavailable. */

@@ -133,3 +133,16 @@ export async function decryptEntryContent(
   const contentKey = await rsaUnwrap(journalPriv, d.lockedKey as BufferSource);
   return maybeGunzip(await aesGcm(contentKey, d.iv, d.body));
 }
+
+/**
+ * Decrypt one attachment (photo / video / audio / pdf) blob given the journal
+ * content private key. Unlike entry content, an attachment blob is a bare D1
+ * envelope — no `<json header>\n` prefix (so no `entryD1Body`) and NOT gzipped:
+ * the AES-GCM plaintext IS the original file bytes. Returns those bytes.
+ */
+export async function decryptAttachment(journalPriv: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+  const d = parseD1(blob);
+  if (!d.lockedKey) throw new Error(`attachment D1 type ${d.type} has no lockedKey`);
+  const contentKey = await rsaUnwrap(journalPriv, d.lockedKey as BufferSource);
+  return aesGcm(contentKey, d.iv, d.body);
+}

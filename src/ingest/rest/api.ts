@@ -169,6 +169,18 @@ export class DayOneApi {
     return new Uint8Array(await r.arrayBuffer());
   }
 
+  /**
+   * Download one attachment's ENCRYPTED blob. The endpoint 307-redirects to the
+   * ciphertext on S3 (`vnd/day-one-encrypted`); `fetch` follows the redirect. The
+   * bytes are a D1 envelope — decrypt with `decryptAttachment` (media.ts).
+   * `attachmentId` is the moment/media `identifier`.
+   */
+  async getAttachment(journalId: string, attachmentId: string): Promise<Uint8Array> {
+    const r = await this.req(`/api/journals/${journalId}/attachments/${attachmentId}/download`);
+    if (!r.ok) throw new ApiError(`GET attachment ${attachmentId} → ${r.status}`, r.status);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+
   /** The passphrase-wrapped user key material (for the full passphrase decrypt path). */
   async getUserKey(): Promise<{ publicKey: string; encryptedPrivateKey: string; fingerprint: string }> {
     const r = await this.req("/api/users/key");
