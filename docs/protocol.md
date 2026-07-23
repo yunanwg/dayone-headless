@@ -8,7 +8,8 @@ ciphertext over Day One's sync API and decrypts it in our own code (no browser).
 It was captured by hooking `crypto.subtle.*` in the live web app and mapping its
 network — **algorithm shapes and endpoints only; no key/plaintext/token values
 were recorded** (byte-safe). Every claim here is re-proven byte-identical against
-the **browser ingester** mirror (the conformance oracle) before it is trusted.
+the **JSON-export** mirror (the conformance oracle, see
+[architecture.md](architecture.md)) before it is trusted.
 
 ## Key hierarchy (observed)
 
@@ -151,7 +152,8 @@ So the whole pipeline is env-only (see `reader.ts`): master key + token/creds �
 unlock user key → per journal unwrap vault key → journal key → per entry unwrap
 content key → decrypt. Validated: the primitives + D1 chain by synthetic
 roundtrips; the live end-to-end decrypt against a known-plaintext entry (with the
-cached user key). Remaining validation the user can run: point `reader.ts` at real
-`DAYONE_ENCRYPTION_KEY` + creds and diff against the JSON export / browser-ingester mirror.
+cached user key). Full validation is the conformance check — diff the REST mirror
+against a JSON-export mirror (`scripts/conformance.ts`); this has been run against
+a real account with zero critical diffs. See [README → Verifying decryption].
 
 Everything else (envelope byte order, AAD=none, salt provenance) is resolved above.

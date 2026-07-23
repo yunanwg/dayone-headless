@@ -20,9 +20,10 @@ web app (client-side E2EE decryption in JS), and we want that as a clean MCP.
 2. **Mirror** — SQLite shaped like Day One's official JSON export schema (stable
    contract). Also the portable backup.
 3. **Ingestion engine** (`src/ingest/…`) — gets + decrypts data into the mirror.
-   Swappable (REST ingester = production, pure HTTPS + own crypto; browser
-   ingester = dev/oracle, drives the web app; JSON-export importer). Swapping it
-   must never require touching the serving layer.
+   Swappable (REST ingester = production, pure HTTPS + own crypto; JSON-export
+   importer = proven manual fallback + conformance oracle; browser ingester =
+   experimental/unproven, see below). Swapping it must never require touching the
+   serving layer.
 
 If a change to the web/crypto side forces an edit in the serving layer, the
 decoupling has leaked — stop and fix the boundary.
@@ -31,14 +32,17 @@ decoupling has leaked — stop and fix the boundary.
 
 1. **Phase 0 — protocol study.** Understand the web app's auth chain, entry
    endpoints, and `crypto.subtle.*` inputs to gauge how hard the pure-REST path
-   is. Auth is the main unknown.
-2. **Phase 1** — serving layer against a manual JSON export. Zero risk.
-3. **Phase 2** — browser ingestion (drives the web app).
-4. **Phase 3** — REST ingestion, built under the browser ingester as oracle +
-   golden conformance tests.
-
-Prefer Phase 1 as the first code: it's decoupled, portable, and needs nothing
-from Day One but one hand-exported JSON file.
+   is. Auth is the main unknown. **Done.**
+2. **Phase 1** — serving layer against a manual JSON export. Zero risk. **Done**,
+   and since expanded (structured filters, media metadata, filterable search).
+3. **Phase 3** — REST ingestion. **Done and proven correct** by byte-identical
+   conformance against a JSON-export oracle (`scripts/conformance.ts`), run
+   against a real account with zero critical diffs.
+4. **Browser ingestion** (was "Phase 2") — **experimental / unproven, deprioritized.**
+   The JSON export turned out to be a stronger, simpler independent oracle than
+   the browser, so the browser ingester is no longer on the critical path. It has
+   open gaps (scaffold login, unmapped tags, divergent id space) and is not a
+   working fallback. Do not treat it as the oracle.
 
 ## Hard rules
 
@@ -69,6 +73,10 @@ committed** — so they are a leak surface too. Two rules:
 
 ## Verifying crypto (REST ingester)
 
-Correctness is proven by **byte-identical conformance against the web app oracle**,
-not by "it looks decrypted." Same entries via our client and via the web app →
-assert equal. This is the OmniFocus codec-cross-validation discipline; keep it.
+Correctness is proven by **byte-identical conformance against an independent
+oracle**, not by "it looks decrypted." The oracle is Day One's own **JSON export**
+(a separate serialization of the same journal): build a mirror from it, build a
+mirror via REST, and byte-diff the decryption-critical fields — see
+`scripts/conformance.ts` and README → *Verifying decryption*. This is the
+OmniFocus codec-cross-validation discipline; keep it. (The browser ingester was
+the intended oracle but is experimental/unproven; the export superseded it.)

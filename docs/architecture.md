@@ -89,11 +89,21 @@ This is what the Docker image ships.
 
 The full protocol and crypto framing is documented in [protocol.md](protocol.md).
 
-### Browser ingester (`src/ingest/browser/`) — dev / oracle only
+### Browser ingester (`src/ingest/browser/`) — experimental / unproven
 
 Drives the official Day One web app in headless Chromium (Playwright) and dumps
 its already-decrypted IndexedDB (`DODexie`) into the mirror. Because the web app
 decrypts client-side, this ingester needs **no crypto of its own**.
+
+> **Status: experimental, not a working fallback.** The orchestration exists but
+> has never been validated end-to-end here, and it has known gaps: automated
+> login is a scaffold (`login.ts`) so every run needs a **manual** headed login;
+> tags are **not mapped** (`map.ts`); and it keys entries by the web app's 18-char
+> id, a **third id space** that does not line up with the 32-hex export/REST uuid.
+> Its would-be unique value — an automated, Mac-free re-ingestion path — is
+> exactly the unbuilt part. Do not rely on it. The **proven** independent oracle
+> is the JSON export (see below); the **proven** manual fallback is the JSON-export
+> importer.
 
 - `run.ts` — the pipeline: launch a persistent Chromium profile → ensure
   authenticated → force-load every journal → dump the stores → completeness gate
@@ -112,27 +122,33 @@ No Day One, browser, or crypto — so the serving layer can be validated
 end-to-end against real data with zero risk. `importExport()` here is the shared
 write path all ingesters use.
 
-## ADR: why keep two live ingesters (REST *and* browser)?
+## ADR: how REST correctness is proven, and what role each ingester plays
 
-They **coexist in code but diverge at runtime**, and each earns its place.
+Three ingesters exist in code; only one ships, and correctness is proven by an
+independent oracle.
 
 - **REST is production.** Pure HTTPS + our own crypto, no browser: small,
-  unattended, containerizable. It is the only ingester in the shipped image.
-- **The browser ingester is the conformance oracle** (and a break-glass
-  fallback). The web app's own JavaScript is, by definition, the correct
-  decryption of your data. So it is the ground truth we check our REST crypto
-  against: decrypt the same entries both ways and byte-diff them. When Day One
-  changes its envelope, crypto, or API, that diff is what tells us *what* broke —
-  black-box byte-guessing is exactly what it replaces (see the "former blocker"
-  note in [protocol.md](protocol.md): a subagent finding a trailing MD5 checksum
-  in the app bundle is what unblocked the REST path).
+  unattended, containerizable. It is the only ingester in the shipped image, and
+  the E2EE it reimplements is the **durable** part — encryption schemes almost
+  never change once shipped.
+- **The JSON export is the conformance oracle.** Day One's own official JSON
+  export is an independent serialization of the same journal, produced by a
+  completely separate pipeline and needing no browser. Building a mirror from it
+  and byte-diffing against the REST mirror is what proves our crypto is correct:
+  every decryption-critical field (entry text, rich text, tags, media
+  identifiers, flags, timed-entry dates) must match. This is implemented in
+  `scripts/conformance.ts` / `test/conformance.test.ts` and has been run against a
+  real account (zero critical diffs). See [README → Verifying decryption].
+- **The JSON-export importer is the proven manual fallback.** If the REST API
+  ever breaks, a hand-exported JSON re-ingests with `bun run import` — no browser,
+  no crypto, already exercised end-to-end.
+- **The browser ingester is experimental** (see its section above): a possible
+  future *automated* fallback, but currently unproven and gap-ridden, so it is not
+  counted on for either oracle or fallback duty.
 
-The E2EE framing REST reimplements is also its **durable** part — encryption
-schemes almost never change once shipped — while the web UI churns often but
-shallowly. So the split is deliberate: ship the durable, dependency-free path;
-keep the churny-but-authoritative path as the test oracle. If we deleted the
-browser ingester we'd lose the only independent check that our crypto still
-matches Day One; if we shipped it we'd drag Chromium into every deployment.
+Keeping the export as the oracle means we get an independent correctness check
+without dragging Chromium — or an unvalidated browser-automation path — into the
+project's trust story.
 
 **Cross-ingester identity caveat:** the web app keys entries by an 18-char web id
 with no relation to the 32-hex export uuid, so identity across a browser-sourced

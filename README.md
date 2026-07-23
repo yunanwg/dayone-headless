@@ -185,9 +185,9 @@ contract between them:
 2. **Mirror** — SQLite shaped like Day One's JSON export (`src/types.ts`,
    `src/serve/db/schema.sql`). Media is metadata only; bytes are fetched on demand.
 3. **Ingesters** (`src/ingest/…`) — the production **REST ingester** (pure HTTPS +
-   our own crypto), a dev-only **browser ingester** (kept as a conformance oracle),
-   and a **JSON-export importer**. All produce the export shape, so the serving
-   layer never changes.
+   our own crypto), a **JSON-export importer** (the proven manual fallback and the
+   independent conformance oracle), and an experimental, unproven **browser
+   ingester**. All produce the export shape, so the serving layer never changes.
 
 Details, and the rationale for keeping two ingesters:
 [docs/architecture.md](docs/architecture.md). Protocol / crypto reference:
