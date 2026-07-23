@@ -1,8 +1,8 @@
 # Browser ingester crosswalk — IndexedDB (`DODexie`) → export-shaped mirror
 
-> Design reference for the **browser ingester** (`src/ingest/browser/`), the
-> dev/oracle path. For how it fits the whole system, see
-> [architecture.md](architecture.md); for the extraction pipeline, see
+> Design reference for the **browser ingester** (`src/ingest/browser/`), an
+> **experimental / unproven** path (not the oracle — that is the JSON export; see
+> [architecture.md](architecture.md)). For the extraction pipeline, see
 > [browser-extractor.md](browser-extractor.md).
 
 This is the field-mapping spec the browser ingester implements. It contains

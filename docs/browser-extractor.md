@@ -1,8 +1,8 @@
 # Browser ingester — driving the web app to fill the mirror
 
-> Design reference for the **browser ingester** (`src/ingest/browser/`), the
-> dev/oracle path. For how it fits the whole system, see
-> [architecture.md](architecture.md).
+> Design reference for the **browser ingester** (`src/ingest/browser/`), an
+> **experimental / unproven** path (not the oracle — that is the JSON export; see
+> [architecture.md](architecture.md)).
 
 Pairs with [browser-crosswalk.md](browser-crosswalk.md) (the field mapping). This
 covers the *extraction*: getting the decrypted DODexie stores out of a driven
