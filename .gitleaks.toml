@@ -16,4 +16,7 @@ regexes = [
   '''1{16,}''',
   '''D1-<userId>-<code''',
   '''D1-user\d+-''',
+  # False positives in early-history recon notes / code, not secrets:
+  '''is_decrypted=\d''',            # a boolean recon flag, not a key
+  '''decryptD1PrivateKey''',        # a TS identifier alias, not a value
 ]
