@@ -15,20 +15,41 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decryptAttachment } from "../src/ingest/rest/d1.ts";
 import { type MediaJob, runMediaJobs } from "../src/ingest/rest/media.ts";
-import { isMediaCached, mediaCachePath, prepareMediaPath } from "../src/media-cache.ts";
+import { isMediaCached, isValidMd5, mediaCachePath, prepareMediaPath } from "../src/media-cache.ts";
+
+const MD5_A = "0123456789abcdef0123456789abcdef";
 
 test("mediaCachePath keys by md5 under the given dir", () => {
-  expect(mediaCachePath("abc123", "/tmp/m")).toBe("/tmp/m/abc123");
+  expect(mediaCachePath(MD5_A, "/tmp/m")).toBe(`/tmp/m/${MD5_A}`);
 });
 
 test("isMediaCached reflects presence; prepareMediaPath makes the dir", async () => {
   const dir = mkdtempSync(join(tmpdir(), "media-"));
-  const md5 = "deadbeef";
+  const md5 = "deadbeefdeadbeefdeadbeefdeadbeef";
   expect(isMediaCached(md5, dir)).toBe(false);
   const path = prepareMediaPath(md5, dir); // mkdirs the parent
   await Bun.write(path, new Uint8Array([1, 2, 3]));
   expect(isMediaCached(md5, dir)).toBe(true);
   expect(existsSync(path)).toBe(true);
+});
+
+test("md5 guard: valid 32-hex passes, everything else is rejected", () => {
+  expect(isValidMd5(MD5_A)).toBe(true);
+  // Wrong length, uppercase, non-hex, and non-string all fail.
+  expect(isValidMd5("abc123")).toBe(false);
+  expect(isValidMd5(MD5_A.toUpperCase())).toBe(false);
+  expect(isValidMd5(`${MD5_A}0`)).toBe(false);
+  expect(isValidMd5(null)).toBe(false);
+  expect(isValidMd5(undefined)).toBe(false);
+});
+
+test("md5 path-traversal strings never join a path", () => {
+  // A malformed / hostile md5 reads as "not cached" and never touches `join`.
+  for (const evil of ["../../etc/passwd", "..", "a/../../secret", "abc\0", "/etc/hosts"]) {
+    expect(isValidMd5(evil)).toBe(false);
+    expect(isMediaCached(evil, "/tmp/m")).toBe(false);
+    expect(() => mediaCachePath(evil, "/tmp/m")).toThrow("invalid media md5");
+  }
 });
 
 test("decryptAttachment round-trips a synthetic D1 type-2 envelope", async () => {
@@ -129,6 +150,28 @@ test("runMediaJobs: verifies md5 before caching and skips already-cached files",
   expect(isMediaCached(jobs[1]!.md5!, dir)).toBe(false); // wrong-decrypt never written
   expect(isMediaCached(jobs[2]!.md5!, dir)).toBe(true);
   expect(isMediaCached(jobs[3]!.md5!, dir)).toBe(true);
+});
+
+test("runMediaJobs: a missing or malformed md5 is skipped up front, never fetched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "media-badmd5-"));
+  const { jobs, bytesFor } = syntheticJobs(2);
+  const bad: MediaJob[] = [
+    { identifier: "NO-MD5", md5: null, kind: "photo", journalId: "J1" },
+    { identifier: "EVIL-MD5", md5: "../../etc/passwd", kind: "photo", journalId: "J1" },
+  ];
+  let fetchCalls = 0;
+  const stats = await runMediaJobs(
+    [...jobs, ...bad],
+    async (job) => {
+      fetchCalls++;
+      return bytesFor(job);
+    },
+    { concurrency: 2, cacheDir: dir },
+  );
+  expect(fetchCalls).toBe(2); // only the two well-formed jobs hit the fetcher
+  expect(stats.skippedNoMd5).toBe(2);
+  expect(stats.fetched).toBe(2);
+  expect(stats.failed).toBe(0);
 });
 
 test("runMediaJobs: one failed download does not abort the rest", async () => {

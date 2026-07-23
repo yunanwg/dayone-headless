@@ -18,7 +18,7 @@
       },
       "weather": { "weatherCode": "clear", "temperatureCelsius": 22.5 },
       "photos": [
-        { "identifier": "PHOTO-ID-1", "md5": "abc123", "type": "jpeg", "orderInEntry": 0 }
+        { "identifier": "PHOTO-ID-1", "md5": "0123456789abcdef0123456789abcdef", "type": "jpeg", "orderInEntry": 0 }
       ]
     },
     {

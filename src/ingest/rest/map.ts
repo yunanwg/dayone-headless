@@ -5,6 +5,7 @@
  * unchanged — the serving-layer contract stays put.
  */
 
+import { isValidMd5 } from "../../media-cache.ts";
 import type { DayOneEntry, DayOneLocation, DayOneMedia, DayOneWeather } from "../../types.ts";
 
 /** Loose decrypted-content object (untyped JSON from the D1 blob). */
@@ -86,7 +87,10 @@ function momentKind(m: Content): MediaKind {
 function mapMoment(m: Content, orderInEntry: number): DayOneMedia {
   const out: Record<string, unknown> = { ...m };
   out.identifier = m.id ?? m.identifier;
-  if (m.md5 !== undefined) out.md5 = m.md5;
+  // Hygiene: only carry a well-formed md5 (32 lowercase hex). A malformed value is
+  // dropped so it never reaches the mirror or the content-addressed media path.
+  if (isValidMd5(m.md5)) out.md5 = m.md5;
+  else delete out.md5;
   const subtype = String(m.contentType ?? "").split("/")[1];
   if (subtype) out.type = subtype;
   if (m.createdAt !== undefined) out.date = toIso(m.createdAt);

@@ -36,8 +36,10 @@ Or run the image directly:
 ```bash
 docker build -t dayone-headless .
 docker run --rm --env-file .env -v dayone:/data dayone-headless sync
-docker run --rm --env-file .env -e DAYONE_MCP_PORT=8477 \
-  -p 127.0.0.1:8477:8477 -v dayone:/data dayone-headless mcp
+# The read-only server needs no secrets — pass only the mirror + bind, never .env.
+docker run --rm -e DAYONE_MIRROR=/data/mirror.db -e DAYONE_MCP_PORT=8477 \
+  -e DAYONE_MCP_HOST=0.0.0.0 -p 127.0.0.1:8477:8477 -v dayone:/data \
+  dayone-headless mcp
 ```
 
 ## Environment & secrets
@@ -52,8 +54,10 @@ store. The full list is in [`.env.example`](../.env.example); the essentials:
 | `DAYONE_EMAIL` + `DAYONE_PASSWORD` | one of | Credentials the client uses to self-mint / auto-renew a token. |
 | `DAYONE_DEVICE_ID` | recommended | Pin a 32-hex device identity (see below). |
 | `DAYONE_MIRROR` | no | Mirror path (compose sets `/data/mirror.db`). |
-| `DAYONE_MCP_PORT` / `DAYONE_MCP_HOST` | no | Serve streamable-HTTP on this port/host instead of stdio. |
-| `DAYONE_SYNC_INTERVAL` | no | Seconds between syncs in compose (default 3600). |
+| `DAYONE_MCP_PORT` / `DAYONE_MCP_HOST` | no | Serve streamable-HTTP on this port/host instead of stdio. Host defaults to `127.0.0.1` (loopback); compose sets it to `0.0.0.0` so the loopback-mapped published port works. |
+| `DAYONE_MCP_TOKEN` | no | If set, every HTTP request must send `Authorization: Bearer <token>` (else 401). Defense-in-depth behind the proxy. |
+| `DAYONE_MCP_ALLOWED_ORIGINS` | no | Comma-separated `Origin` allowlist for browser clients (DNS-rebinding protection). Empty (default) rejects all browser origins; non-browser MCP clients send no `Origin` and are unaffected. |
+| `DAYONE_SYNC_INTERVAL` | no | Seconds between syncs in compose (default 3600). Consumed by `sync` only. |
 | `DAYONE_MIRROR_WAIT` | no | Seconds the MCP server waits for the mirror on first boot (default 300). |
 
 Handling rules (the code cooperates — it only ever reads secrets from env and
@@ -62,8 +66,10 @@ never logs them):
 - Keep `.env` with tight permissions on the ingestion host only, or use
   Docker/compose secrets. Never commit it (it is git-ignored, and gitleaks runs
   in CI and pre-commit).
-- The **reading** side (a remote MCP client) needs only the mirror, not the
-  secrets. Only the `sync` side needs `DAYONE_ENCRYPTION_KEY` and auth.
+- The **reading** side (the `mcp` service) needs only the mirror, not the
+  secrets. Only the `sync` side needs `DAYONE_ENCRYPTION_KEY` and auth — so the
+  compose `mcp` service deliberately has **no `env_file`**, keeping the master key
+  and password out of a process that merely reads the mirror.
 - Verify config without exposing values: `docker compose run --rm sync doctor`
   reports secret *presence and shape*, never the values.
 
@@ -94,6 +100,20 @@ tunnel is the usual self-hosted-MCP pattern:
 2. Put a Cloudflare Access policy in front of the resulting hostname so only your
    identity can reach it.
 3. Point your remote MCP client at the Access-protected URL.
+
+### Defense-in-depth on the HTTP surface
+
+The proxy is the primary control; the server adds two optional in-process checks
+so a misconfigured tunnel (or a rebinding browser) isn't a single point of failure:
+
+- **`DAYONE_MCP_TOKEN`** — set it and every HTTP request must carry
+  `Authorization: Bearer <token>` or gets a `401` (constant-time compared). Point
+  your MCP client (or the tunnel) at the same token. Unset = no token check.
+- **`DAYONE_MCP_ALLOWED_ORIGINS`** — a comma-separated allowlist of browser
+  `Origin` values (DNS-rebinding protection). Any request with an `Origin` not on
+  the list gets a `403` before MCP handling; the default (empty) rejects all
+  browser origins. Normal non-browser MCP clients send no `Origin` and are
+  unaffected, so you usually leave this empty.
 
 Harden the host like any box holding a private key: least privilege, disk
 encryption, restricted egress.

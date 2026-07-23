@@ -6,8 +6,9 @@
 #
 #   build:  docker build -t dayone-headless .
 #   sync:   docker run --rm --env-file .env -v dayone:/data dayone-headless sync
-#   mcp:    docker run --rm --env-file .env -e DAYONE_MCP_PORT=8477 -p 8477:8477 \
-#             -v dayone:/data dayone-headless mcp
+#   mcp:    docker run --rm -e DAYONE_MIRROR=/data/mirror.db -e DAYONE_MCP_PORT=8477 \
+#             -e DAYONE_MCP_HOST=0.0.0.0 -p 127.0.0.1:8477:8477 -v dayone:/data \
+#             dayone-headless mcp   # read-only: no --env-file, no secrets
 
 # --- deps: production dependencies only (no biome/playwright/typescript) ---
 FROM oven/bun:1.3-slim AS deps

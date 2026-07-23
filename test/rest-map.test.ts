@@ -45,8 +45,9 @@ test("mapEntry normalizes an entry to the export shape", () => {
       sunriseDate: 1_626_900_000_000,
     },
     moments: [
-      { id: "M1", md5: "abc", contentType: "image/jpeg", momentType: "photo" },
-      { id: "M2", md5: "def", contentType: "video/mp4", momentType: "video" },
+      // M1 carries a well-formed md5; M2's is malformed and must be dropped.
+      { id: "M1", md5: "a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8", contentType: "image/jpeg", momentType: "photo" },
+      { id: "M2", md5: "not-a-real-md5", contentType: "video/mp4", momentType: "video" },
     ],
   };
 
@@ -79,7 +80,9 @@ test("mapEntry normalizes an entry to the export shape", () => {
   expect(e.videos).toHaveLength(1);
   expect(e.audios).toBeUndefined();
   expect(e.photos[0].identifier).toBe("M1");
-  expect(e.photos[0].md5).toBe("abc");
+  expect(e.photos[0].md5).toBe("a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8");
   expect(e.photos[0].type).toBe("jpeg");
   expect(e.videos[0].type).toBe("mp4");
+  // Hygiene: a malformed md5 is dropped at mapping time, never entering the mirror.
+  expect(e.videos[0].md5).toBeUndefined();
 });

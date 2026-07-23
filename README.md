@@ -134,7 +134,16 @@ md5-verified before it is written, so a wrong decrypt is never cached.
 `daytwo mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io).
 By default it serves over **stdio** (for a local client that spawns the process);
 set `DAYONE_MCP_PORT` to serve **streamable-HTTP** instead (for an always-on
-service).
+service). The HTTP server binds to **loopback `127.0.0.1`** by default
+(`DAYONE_MCP_HOST` overrides it) — always keep it behind an authenticating proxy.
+
+For defense-in-depth on the HTTP transport (behind that proxy), two optional env
+knobs harden the process itself: `DAYONE_MCP_TOKEN` requires
+`Authorization: Bearer <token>` on every request (else 401), and
+`DAYONE_MCP_ALLOWED_ORIGINS` is a comma-separated `Origin` allowlist for browser
+clients (DNS-rebinding protection; default rejects all browser origins).
+Non-browser MCP clients send no `Origin` and are unaffected. See
+[docs/deployment.md](docs/deployment.md).
 
 Add it to a stdio MCP client (e.g. Claude Desktop / Claude Code) roughly like:
 
@@ -180,10 +189,12 @@ Tools exposed (all read-only):
 The image is a multi-stage `oven/bun` build, runs **non-root**, and ships **no
 browser**.
 
-**Never expose the MCP port raw.** It decrypts your entire journal; anyone who
-reaches it can read everything. Front it with an authenticating proxy — e.g. a
+**Never expose the MCP port raw.** It reads your entire decrypted journal; anyone
+who reaches it can read everything. Front it with an authenticating proxy — e.g. a
 [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/) tunnel —
-the usual self-hosted-MCP bridge pattern.
+the usual self-hosted-MCP bridge pattern. The compose `mcp` service holds **no
+secrets** (only `sync` gets the key + password) and behind the proxy you can add
+`DAYONE_MCP_TOKEN` / `DAYONE_MCP_ALLOWED_ORIGINS` for defense-in-depth.
 
 Full walkthrough (env/secrets handling, pinning the device id, sync cadence,
 Cloudflare Access, backups): [docs/deployment.md](docs/deployment.md).

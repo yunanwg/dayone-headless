@@ -7,6 +7,27 @@
 import type { Database } from "bun:sqlite";
 import { isMediaCached, MEDIA_DIR, mediaCachePath } from "../media-cache.ts";
 
+/**
+ * A malformed full-text query (unbalanced quote, dangling operator, unknown column
+ * filter, …). Thrown by `searchEntries` so callers can surface a clean "invalid
+ * search query" instead of leaking a raw SQLite error. Other DB errors are never
+ * mapped to this — only genuine FTS5 query-syntax failures.
+ */
+export class InvalidSearchQueryError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "InvalidSearchQueryError";
+  }
+}
+
+/** True if a thrown DB error is an FTS5 query-syntax error (vs. a real DB fault). */
+function isFtsQueryError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    /fts5:|unterminated string|malformed MATCH|no such column|syntax error/i.test(err.message)
+  );
+}
+
 export interface JournalRow {
   id: number;
   name: string;
@@ -156,8 +177,15 @@ function entryFilterClauses(filters: ListFilters): {
     params.$to = `${filters.to}~`;
   }
   if (filters.place !== undefined) {
-    clauses.push("(e.place_name LIKE $place OR e.locality_name LIKE $place OR e.country LIKE $place)");
-    params.$place = `%${filters.place}%`;
+    // Escape LIKE wildcards (%, _) and the escape char itself so the user's text
+    // is matched as a literal substring, not a pattern. `ESCAPE '\'` names `\` as
+    // the escape character for the three columns.
+    const place = filters.place.replace(/[\\%_]/g, "\\$&");
+    clauses.push(
+      "(e.place_name LIKE $place ESCAPE '\\' OR e.locality_name LIKE $place ESCAPE '\\' " +
+        "OR e.country LIKE $place ESCAPE '\\')",
+    );
+    params.$place = `%${place}%`;
   }
   if (filters.tag !== undefined) {
     // Correlated existence check keeps the row-per-entry shape (no fan-out).
@@ -183,18 +211,29 @@ export function searchEntries(db: Database, query: string, filters: ListFilters 
   params.$limit = filters.limit ?? 25;
   params.$offset = filters.offset ?? 0;
 
-  return db
-    .query(
-      `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
-              snippet(entry_fts, 1, '[', ']', ' … ', 12) AS snippet
-       FROM entry_fts
-       JOIN entry e ON e.uuid = entry_fts.uuid
-       JOIN journal j ON j.id = e.journal_id
-       WHERE entry_fts MATCH $q${clauses.length ? ` AND ${clauses.join(" AND ")}` : ""}
-       ORDER BY rank
-       LIMIT $limit OFFSET $offset`,
-    )
-    .all(params) as EntrySummary[];
+  try {
+    return db
+      .query(
+        `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
+                snippet(entry_fts, 1, '[', ']', ' … ', 12) AS snippet
+         FROM entry_fts
+         JOIN entry e ON e.uuid = entry_fts.uuid
+         JOIN journal j ON j.id = e.journal_id
+         WHERE entry_fts MATCH $q${clauses.length ? ` AND ${clauses.join(" AND ")}` : ""}
+         ORDER BY rank
+         LIMIT $limit OFFSET $offset`,
+      )
+      .all(params) as EntrySummary[];
+  } catch (err) {
+    if (isFtsQueryError(err)) {
+      throw new InvalidSearchQueryError(
+        'invalid search query — check FTS5 syntax (balance quotes; use "..." for a phrase, ' +
+          "AND/OR/NOT to combine, and * for a prefix)",
+        { cause: err },
+      );
+    }
+    throw err; // a real DB fault — do not swallow it
+  }
 }
 
 /**

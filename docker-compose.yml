@@ -27,13 +27,17 @@ services:
     depends_on:
       - sync
     restart: unless-stopped
-    env_file: .env
+    # NO env_file here: the read-only server only reads the mirror, so it must not
+    # hold the encryption key / account password. Only `sync` needs those.
     environment:
       DAYONE_MIRROR: /data/mirror.db
       DAYONE_MCP_PORT: "8477"
+      # Bind inside the container to all interfaces so the published port works; the
+      # host mapping below keeps the actual exposure on loopback (127.0.0.1).
+      DAYONE_MCP_HOST: "0.0.0.0"
     volumes:
       - mirror:/data
-    # Bind to loopback only; front it with cloudflared + CF Access for remote use.
+    # Host exposure is loopback only; front it with cloudflared + CF Access remotely.
     ports:
       - "127.0.0.1:8477:8477"
     command: ["mcp"]
