@@ -1,5 +1,5 @@
 /**
- * `dayone doctor` — a config + mirror self-check. Reports the PRESENCE and shape
+ * `daytwo doctor` — a config + mirror self-check. Reports the PRESENCE and shape
  * of secrets, never their values. Returns 0 when healthy, 1 otherwise.
  */
 
@@ -55,7 +55,7 @@ export async function doctor(): Promise<number> {
 
   // --- mirror ---
   if (!existsSync(DEFAULT_MIRROR)) {
-    check(`mirror (${DEFAULT_MIRROR})`, false, "not found — run `dayone sync`");
+    check(`mirror (${DEFAULT_MIRROR})`, false, "not found — run `daytwo sync`");
   } else {
     const db = openMirror();
     const entries = (db.query("SELECT COUNT(*) c FROM entry").get() as { c: number }).c;

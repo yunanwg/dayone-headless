@@ -44,9 +44,9 @@ and decrypted cache. Both are as sensitive as the journal itself.
 - Harden the host like any device holding a private key: least privilege, disk
   encryption, restricted network egress.
 
-## Legal / ToS
+## Legal
 
-This automates Day One's private web client against **your own account and data**
+This reads Day One's private web client against **your own account and data**
 for personal use. It is not affiliated with or endorsed by Day One / Automattic,
 and the private API may change or block access at any time. Use at your own risk.
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
 /**
- * dayone — the single entry point. Read commands query the local mirror; `sync`
+ * daytwo — the single entry point. Read commands query the local mirror; `sync`
  * refreshes it (REST ingester); `mcp` serves it over MCP; `doctor` self-checks.
  *
- *   dayone sync                 fetch + decrypt + write the mirror (needs env)
- *   dayone mcp                  run the read-only MCP server (stdio)
- *   dayone doctor               check config + mirror health
- *   dayone journals             list journals + counts + freshness
- *   dayone search <q> [limit]   full-text search
- *   dayone get <uuid>           one entry
- *   dayone on-this-day [MM-DD]  entries for a month-day across years
+ *   daytwo sync                 fetch + decrypt + write the mirror (needs env)
+ *   daytwo mcp                  run the read-only MCP server (stdio)
+ *   daytwo doctor               check config + mirror health
+ *   daytwo journals             list journals + counts + freshness
+ *   daytwo search <q> [limit]   full-text search
+ *   daytwo get <uuid>           one entry
+ *   daytwo on-this-day [MM-DD]  entries for a month-day across years
  */
 
 import { existsSync } from "node:fs";
@@ -25,7 +25,7 @@ function todayMonthDay(): string {
 }
 function requireMirror() {
   if (!existsSync(DEFAULT_MIRROR)) {
-    console.error(`no mirror at ${DEFAULT_MIRROR} — run \`dayone sync\` first.`);
+    console.error(`no mirror at ${DEFAULT_MIRROR} — run \`daytwo sync\` first.`);
     process.exit(2);
   }
   return openMirror();
@@ -67,7 +67,7 @@ switch (cmd) {
   case "get": {
     const uuid = rest[0];
     if (!uuid) {
-      console.error("usage: dayone get <uuid>");
+      console.error("usage: daytwo get <uuid>");
       process.exit(1);
     }
     const db = requireMirror();
@@ -84,7 +84,7 @@ switch (cmd) {
   case "search": {
     const query = rest[0];
     if (!query) {
-      console.error("usage: dayone search <query> [limit]");
+      console.error("usage: daytwo search <query> [limit]");
       process.exit(1);
     }
     const db = requireMirror();

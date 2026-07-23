@@ -31,7 +31,7 @@ Individual scripts: `bun run typecheck | lint | format | test`. Tests run with
 ```
 src/
   serve/            the serving layer — pure TS + bun:sqlite, no Day One/crypto
-    cli.ts          the `dayone` dispatcher
+    cli.ts          the `daytwo` dispatcher
     mcp.ts          read-only MCP server
     queries.ts      every read query (CLI + MCP share these)
     doctor.ts       config + mirror health check

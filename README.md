@@ -5,9 +5,9 @@ journals, shipped as a **CLI and an MCP server**. Runs anywhere [Bun](https://bu
 runs (Linux / macOS), so it can live in a homelab container and be reached
 remotely by an AI agent or from the command line.
 
-> Read-only. Personal use. Not affiliated with Day One / Automattic. It talks to
-> Day One's private web API, which may change or block access at any time — see
-> [Status & disclaimer](#status--disclaimer).
+> **Unofficial, read-only, personal-use.** Not affiliated with or endorsed by
+> Day One / Automattic. It reads Day One's private, undocumented web API against
+> your own account — that API may change or stop working at any time.
 
 ## Why this exists
 
@@ -85,24 +85,24 @@ safely.
 
 ## Commands
 
-The single `dayone` dispatcher (`src/serve/cli.ts`; also the `dayone` bin):
+The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 
 | Command | What it does |
 |---|---|
-| `dayone sync` | Fetch, decrypt, and write the mirror (needs env). |
-| `dayone mcp` | Run the read-only MCP server. stdio by default; streamable-HTTP if `DAYONE_MCP_PORT` is set. |
-| `dayone doctor` | Config + mirror health self-check (reports secret *presence/shape*, never values). |
-| `dayone journals` | List journals with entry counts and freshness. |
-| `dayone search <q> [limit]` | Full-text search over entry bodies. |
-| `dayone get <uuid>` | One entry's full content + metadata. |
-| `dayone on-this-day [MM-DD]` | Entries for a month-day across years (defaults to today). |
+| `daytwo sync` | Fetch, decrypt, and write the mirror (needs env). |
+| `daytwo mcp` | Run the read-only MCP server. stdio by default; streamable-HTTP if `DAYONE_MCP_PORT` is set. |
+| `daytwo doctor` | Config + mirror health self-check (reports secret *presence/shape*, never values). |
+| `daytwo journals` | List journals with entry counts and freshness. |
+| `daytwo search <q> [limit]` | Full-text search over entry bodies. |
+| `daytwo get <uuid>` | One entry's full content + metadata. |
+| `daytwo on-this-day [MM-DD]` | Entries for a month-day across years (defaults to today). |
 
-Run via `bun run src/serve/cli.ts <cmd>`, the `dayone` bin, or the package
+Run via `bun run src/serve/cli.ts <cmd>`, the `daytwo` bin, or the package
 scripts: `bun run sync | mcp | cli | import | check | lint | format | typecheck | test`.
 
 ## MCP usage
 
-`dayone mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io).
+`daytwo mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io).
 By default it serves over **stdio** (for a local client that spawns the process);
 set `DAYONE_MCP_PORT` to serve **streamable-HTTP** instead (for an always-on
 service).
@@ -112,7 +112,7 @@ Add it to a stdio MCP client (e.g. Claude Desktop / Claude Code) roughly like:
 ```json
 {
   "mcpServers": {
-    "dayone": {
+    "daytwo": {
       "command": "bun",
       "args": ["run", "/absolute/path/to/dayone-headless/src/serve/cli.ts", "mcp"],
       "env": { "DAYONE_MIRROR": "/absolute/path/to/data/mirror.db" }
@@ -182,15 +182,6 @@ Details, and the rationale for keeping two ingesters:
 environment and are never logged or committed; the mirror, exports, and browser
 profile are all gitignored; reads are the only paths. Full threat model and
 deployment rules: [SECURITY.md](SECURITY.md).
-
-## Status & disclaimer
-
-- **Read-only.** There are no write paths to Day One.
-- **No Mac / Day One desktop dependency**, by design.
-- This automates Day One's **private** web client against **your own account and
-  data** for personal use. It is a ToS gray area, is **not affiliated with or
-  endorsed by Day One / Automattic**, and the private API may change or block
-  access at any time.
 
 ## Contributing
 

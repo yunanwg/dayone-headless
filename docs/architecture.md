@@ -31,7 +31,7 @@ testable in isolation.
 - `queries.ts` — the single definition of every read: `listJournals`,
   `searchEntries` (FTS5), `getEntry`, `onThisDay`, `getSyncedAt`. Both the CLI
   and the MCP server call these — one source of truth.
-- `cli.ts` — the `dayone` dispatcher (`journals`, `search`, `get`,
+- `cli.ts` — the `daytwo` dispatcher (`journals`, `search`, `get`,
   `on-this-day`, plus `sync`, `mcp`, `doctor`).
 - `mcp.ts` — the read-only MCP server. Same queries, exposed as tools
   (`list_journals`, `search_entries`, `get_entry`, `on_this_day`). Every result

@@ -16,7 +16,7 @@ the pieces fit.
 
 The image (`Dockerfile`) is a multi-stage `oven/bun` build. It runs **non-root**
 (`bun` user), contains **no browser** (the browser ingester is dev-only), and
-declares a `HEALTHCHECK` that goes healthy once `dayone doctor` passes (i.e. once
+declares a `HEALTHCHECK` that goes healthy once `daytwo doctor` passes (i.e. once
 the first sync has populated the mirror).
 
 The MCP server waits for the mirror to appear before serving (up to
@@ -77,7 +77,7 @@ Day One registers a **new device every sync**. Pin a stable 32-hex value once
 
 - `DAYONE_SYNC_INTERVAL` sets how often the mirror refreshes. Incremental syncs
   are cheap, so a short interval (e.g. 15–60 min) is fine.
-- Every read result carries `synced_at`; `dayone doctor` warns when the mirror is
+- Every read result carries `synced_at`; `daytwo doctor` warns when the mirror is
   more than 24h stale.
 - One bad entry can't fail a whole sync — it is skipped and the rest proceed.
 

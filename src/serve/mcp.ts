@@ -24,7 +24,7 @@ const waitS = Number(process.env.DAYONE_MIRROR_WAIT ?? 300);
 const deadline = Date.now() + waitS * 1000;
 while (!existsSync(DEFAULT_MIRROR)) {
   if (Date.now() > deadline) {
-    console.error(`mirror not found at ${DEFAULT_MIRROR} after ${waitS}s. Run \`dayone sync\` first.`);
+    console.error(`mirror not found at ${DEFAULT_MIRROR} after ${waitS}s. Run \`daytwo sync\` first.`);
     process.exit(1);
   }
   await Bun.sleep(3000);
