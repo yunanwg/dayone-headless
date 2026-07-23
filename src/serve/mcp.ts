@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { boundedPositiveInteger, MCP_CONCURRENCY_BOUNDS, MIRROR_WAIT_BOUNDS } from "../runtime-config.ts";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import {
   COVERAGE_JOURNAL_MAX,
@@ -30,7 +31,12 @@ import {
   sampleEntries,
 } from "./evidence.ts";
 import { httpGateConfigFromEnv } from "./http-auth.ts";
-import { handleStatelessMcpHttpRequest, MCP_HTTP_MAX_REQUEST_BODY_BYTES } from "./mcp-http.ts";
+import {
+  handleStatelessMcpHttpRequest,
+  MCP_HTTP_DEFAULT_MAX_CONCURRENCY,
+  MCP_HTTP_MAX_REQUEST_BODY_BYTES,
+  RequestConcurrencyLimiter,
+} from "./mcp-http.ts";
 import {
   MEDIA_IDENTIFIER_MAX_CHARS,
   mediaNotFoundResult,
@@ -66,7 +72,11 @@ import {
 
 // Wait for the mirror to exist (a sibling `sync` may still be doing the first
 // sync). Poll up to DAYONE_MIRROR_WAIT seconds (default 300), then give up.
-const waitS = Number(process.env.DAYONE_MIRROR_WAIT ?? 300);
+const waitS = boundedPositiveInteger(
+  "DAYONE_MIRROR_WAIT",
+  process.env.DAYONE_MIRROR_WAIT,
+  MIRROR_WAIT_BOUNDS,
+);
 const deadline = Date.now() + waitS * 1000;
 while (!existsSync(DEFAULT_MIRROR)) {
   if (Date.now() > deadline) {
@@ -539,23 +549,44 @@ function buildServer(): McpServer {
   return server;
 }
 
-const port = process.env.DAYONE_MCP_PORT;
+const configuredPort = process.env.DAYONE_MCP_PORT;
 
-if (port) {
-  // Defense-in-depth: optional bearer-token auth + origin allowlist (see http-auth.ts).
-  const gate = httpGateConfigFromEnv();
+if (configuredPort) {
+  const port = boundedPositiveInteger("DAYONE_MCP_PORT", configuredPort, {
+    defaultValue: 8477,
+    minimum: 1,
+    maximum: 65_535,
+  });
+  const host = process.env.DAYONE_MCP_HOST?.trim() || "127.0.0.1";
+  const localHosts = `127.0.0.1:${port},localhost:${port}`;
+  const gate = httpGateConfigFromEnv({
+    ...process.env,
+    DAYONE_MCP_HOST: host,
+    DAYONE_MCP_ALLOWED_HOSTS: process.env.DAYONE_MCP_ALLOWED_HOSTS ?? localHosts,
+  });
+  const configuredConcurrency = boundedPositiveInteger(
+    "DAYONE_MCP_MAX_CONCURRENCY",
+    process.env.DAYONE_MCP_MAX_CONCURRENCY,
+    {
+      ...MCP_CONCURRENCY_BOUNDS,
+      defaultValue: MCP_HTTP_DEFAULT_MAX_CONCURRENCY,
+    },
+  );
+  const limiter = new RequestConcurrencyLimiter(configuredConcurrency);
 
   Bun.serve({
-    port: Number(port),
+    port,
     maxRequestBodySize: MCP_HTTP_MAX_REQUEST_BODY_BYTES,
-    // Default to loopback; the proxy/tunnel in front handles remote exposure. In
-    // Docker the published-port bind needs 0.0.0.0 — compose sets DAYONE_MCP_HOST.
-    hostname: process.env.DAYONE_MCP_HOST ?? "127.0.0.1",
-    fetch: (req) => handleStatelessMcpHttpRequest(req, { gate, buildServer }),
+    idleTimeout: 30,
+    // Default to loopback. A non-loopback/container wildcard bind is accepted
+    // only when the configured gate performs static or Cloudflare authentication.
+    hostname: host,
+    fetch: (req) => handleStatelessMcpHttpRequest(req, { gate, buildServer, limiter }),
   });
   console.error(
-    `dayone-headless MCP server ready (read-only, stateless http :${port}, ` +
-      `${MCP_HTTP_MAX_REQUEST_BODY_BYTES}-byte request limit)`,
+    `dayone-headless MCP server ready (read-only, stateless http ${host}:${port}/mcp, ` +
+      `auth=${gate.authentication.mode}, ${MCP_HTTP_MAX_REQUEST_BODY_BYTES}-byte request limit, ` +
+      `concurrency=${limiter.maximum})`,
   );
 } else {
   await buildServer().connect(new StdioServerTransport());

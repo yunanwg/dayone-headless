@@ -117,3 +117,13 @@ test("fetchChangedEntries: concurrency 1 behaves like the old sequential path", 
   );
   expect(order).toEqual(["1", "2", "3"]);
 });
+
+test("fetchChangedEntries bounds retained decrypted source across a journal", async () => {
+  const refs = [ref("A"), ref("B"), ref("C")];
+  const one = syntheticContent("A");
+  const maximum = Buffer.byteLength(one, "utf8") * 2;
+  const result = await fetchChangedEntries(refs, async (r) => syntheticContent(r.entryId), 1, maximum);
+  expect(result.mapped).toHaveLength(2);
+  expect(result.done).toHaveLength(2);
+  expect(result.failed).toBe(1);
+});

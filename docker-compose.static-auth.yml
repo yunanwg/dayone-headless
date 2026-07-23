@@ -1,0 +1,14 @@
+# Optional defense-in-depth static bearer for clients that can set custom headers.
+# This mode is not OAuth.
+
+services:
+  mcp:
+    environment:
+      DAYONE_MCP_AUTH_MODE: static
+      DAYONE_MCP_TOKEN_FILE: /run/secrets/dayone_mcp_token
+    secrets:
+      - dayone_mcp_token
+
+secrets:
+  dayone_mcp_token:
+    file: ${DAYONE_MCP_TOKEN_SECRET_FILE:-./secrets/dayone_mcp_token}

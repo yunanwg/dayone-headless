@@ -17,6 +17,8 @@
  *   bun run src/ingest/rest/sync.ts
  */
 
+import { boundedPositiveInteger, SYNC_CONCURRENCY_BOUNDS } from "../../runtime-config.ts";
+import { requireSecret } from "../../secret-config.ts";
 import { openMirror } from "../../serve/db/open.ts";
 import {
   assertSyncAttempt,
@@ -44,15 +46,17 @@ export interface SyncResult {
   syncedAt: string | null;
 }
 
-const DEFAULT_SYNC_CONCURRENCY = 8;
-
 type SyncReader = Pick<RestReader, "unlockKeys" | "decryptJournalName" | "listEntries" | "decryptEntry">;
+export const MAX_SYNC_ENTRY_REFS = 100_000;
+export const MAX_MAPPED_SOURCE_BYTES_PER_JOURNAL = 64 * 1024 * 1024;
 
 /** `opts.concurrency` wins; else DAYONE_SYNC_CONCURRENCY; else the default. */
 function resolveConcurrency(opts: { concurrency?: number }): number {
-  if (opts.concurrency !== undefined) return Math.max(1, opts.concurrency);
-  const fromEnv = Number(process.env.DAYONE_SYNC_CONCURRENCY);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : DEFAULT_SYNC_CONCURRENCY;
+  return boundedPositiveInteger(
+    "DAYONE_SYNC_CONCURRENCY",
+    opts.concurrency ?? process.env.DAYONE_SYNC_CONCURRENCY,
+    SYNC_CONCURRENCY_BOUNDS,
+  );
 }
 
 /**
@@ -69,14 +73,25 @@ export async function fetchChangedEntries(
   toFetch: readonly EntryRef[],
   decrypt: (r: EntryRef) => Promise<string | null>,
   concurrency: number,
+  maximumMappedSourceBytes = MAX_MAPPED_SOURCE_BYTES_PER_JOURNAL,
 ): Promise<{ mapped: DayOneEntry[]; done: EntryRef[]; failed: number }> {
+  if (!Number.isSafeInteger(maximumMappedSourceBytes) || maximumMappedSourceBytes < 1) {
+    throw new RangeError("maximum mapped source bytes must be a positive safe integer");
+  }
   const mapped: DayOneEntry[] = [];
   const done: EntryRef[] = [];
   let failed = 0;
+  let retainedSourceBytes = 0;
   await runPool(toFetch, concurrency, async (r) => {
     try {
       const content = await decrypt(r);
       if (content) {
+        const contentBytes = Buffer.byteLength(content, "utf8");
+        if (retainedSourceBytes + contentBytes > maximumMappedSourceBytes) {
+          failed++;
+          return;
+        }
+        retainedSourceBytes += contentBytes;
         mapped.push(mapEntry(JSON.parse(content), { editDate: r.editDate }));
         done.push(r);
       } else {
@@ -125,6 +140,7 @@ export async function sync(
     let changed = 0;
     let removed = 0;
     let journalCount = 0;
+    let observedEntryRefs = 0;
 
     for (const j of keys.journals) {
       if (!j?.encryption?.vault?.keys?.length) continue;
@@ -132,6 +148,10 @@ export async function sync(
       const name = (await reader.decryptJournalName(j.name, j.id, keys)) ?? `journal-${j.id}`;
 
       const refs = await reader.listEntries(j.id);
+      observedEntryRefs += refs.length;
+      if (observedEntryRefs > MAX_SYNC_ENTRY_REFS) {
+        throw new Error(`sync feed exceeded the ${MAX_SYNC_ENTRY_REFS}-entry safety limit`);
+      }
       const feedUuids = new Set(refs.map((r) => r.entryId));
       const stored = new Map<string, string>();
       for (const row of db
@@ -171,7 +191,7 @@ export async function sync(
       removed += remove.size;
       changed += mapped.length;
       log(
-        `  ${name}: +${mapped.length} changed, -${remove.size} removed` +
+        `  journal ${journalCount}: +${mapped.length} changed, -${remove.size} removed` +
           (result.failed ? `, !${result.failed} failed` : ""),
       );
     }
@@ -225,8 +245,7 @@ export async function sync(
 }
 
 if (import.meta.main) {
-  const masterKey = process.env.DAYONE_ENCRYPTION_KEY;
-  if (!masterKey) throw new Error("set DAYONE_ENCRYPTION_KEY (the D1-<userId>-<code…> encryption key)");
+  const masterKey = requireSecret("DAYONE_ENCRYPTION_KEY");
   const t0 = Date.now();
   const r = await sync(masterKey, { onProgress: (m) => console.error(m) });
   console.error(

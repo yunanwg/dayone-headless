@@ -44,8 +44,9 @@ it as a clean CLI and MCP server over a local, decrypted **mirror**.
 - **Portable, decoupled mirror** — a local SQLite DB shaped like Day One's JSON
   export. It is also your portable backup, and nothing it can't yet model is lost
   (every row keeps the verbatim source in a `raw` column).
-- **Secrets from env only** — never logged, never committed; secret scanning in CI
-  and pre-commit.
+- **Secrets from env or secret files** — direct values and Docker-style `_FILE`
+  inputs are mutually exclusive, never logged, never committed; secret scanning
+  runs in CI and pre-commit.
 
 ## Quickstart
 
@@ -85,7 +86,7 @@ bun run mcp                  # start the read-only MCP server (stdio)
 Docker path (always-on service):
 
 ```bash
-docker compose up -d         # periodic sync + always-on MCP, sharing one mirror
+docker compose up -d         # after provisioning file secrets; see Deployment
 ```
 
 See [Deployment](#deployment) for the container details and how to expose it
@@ -182,15 +183,18 @@ service). The HTTP server binds to **loopback `127.0.0.1`** by default
 (`DAYONE_MCP_HOST` overrides it) — always keep it behind an authenticating proxy.
 The HTTP transport is stateless: every POST gets a fresh MCP server/transport,
 with no retained session map or session IDs. Request bodies are capped at 256
-KiB by Bun before JSON parsing.
+KiB by Bun before JSON parsing. The only HTTP route is **`POST /mcp`**; responses
+are non-cacheable and excess concurrent requests receive `429` with
+`Retry-After`.
 
-For defense-in-depth on the HTTP transport (behind that proxy), two optional env
-knobs harden the process itself: `DAYONE_MCP_TOKEN` requires
-`Authorization: Bearer <token>` on every request (else 401), and
-`DAYONE_MCP_ALLOWED_ORIGINS` is a comma-separated `Origin` allowlist for browser
-clients (DNS-rebinding protection; default rejects all browser origins).
-Non-browser MCP clients send no `Origin` and are unaffected. See
-[docs/deployment.md](docs/deployment.md).
+The HTTP boundary requires an exact `Host` allowlist and offers three explicit
+authentication modes: `none` for a literal loopback bind only, `static` for a
+high-entropy bearer (not OAuth), and `cloudflare-access` to verify the Access JWT
+assertion injected by Cloudflare. A Host allowlist is routing validation, not
+authentication; startup rejects `none` on wildcard, LAN, container-network, or
+public binds. An exact `Origin` allowlist separately blocks browser rebinding;
+the default rejects all browser origins. See
+[docs/deployment.md](docs/deployment.md) before enabling remote access.
 
 Add it to a stdio MCP client (e.g. Claude Desktop / Claude Code) roughly like:
 
@@ -206,8 +210,8 @@ Add it to a stdio MCP client (e.g. Claude Desktop / Claude Code) roughly like:
 }
 ```
 
-The reading MCP process needs only the mirror — no secrets. (Keep the secrets on
-whatever runs `sync`.)
+The reading MCP process needs only the mirror and, optionally, its own transport
+credential — never the Day One encryption key or upstream account credential.
 
 Tools exposed (all read-only):
 
@@ -283,22 +287,31 @@ so a stale process cannot write or finalize after a newer attempt starts.
 
 ## Deployment
 
-`docker compose up -d` brings up two services sharing one mirror volume:
+The Compose stack defines two services sharing one mirror volume:
 
 - **`sync`** — runs the REST ingester on an interval (`DAYONE_SYNC_INTERVAL`,
   default 1h; incremental, so cheap).
 - **`mcp`** — an always-on read-only MCP server over streamable-HTTP, bound to
-  **loopback `127.0.0.1:8477`**.
+  a container wildcard and published only on host **loopback
+  `127.0.0.1:8477`**. Configure static or Cloudflare Access authentication
+  before starting it; `none` is rejected because the process bind is not
+  loopback.
 
-The image is a multi-stage `oven/bun` build, runs **non-root**, and ships **no
-browser**.
+The image is a multi-stage, version-pinned `oven/bun` build and ships **no
+browser**. A minimal root entrypoint accepts only the fixed, non-symlink
+`/run/secrets/<known-name>` mounts and copies them into a private tmpfs so
+owner-only files work across arbitrary Linux host UIDs; it then starts the
+application as `bun` with an empty capability bounding set and
+`no-new-privileges`. Compose makes each root filesystem read-only, limits PIDs,
+uses service-specific readiness checks, and mounts upstream credentials only
+into `sync`.
 
 **Never expose the MCP port raw.** It reads your entire decrypted journal; anyone
 who reaches it can read everything. Front it with an authenticating proxy — e.g. a
 [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/) tunnel —
-the usual self-hosted-MCP bridge pattern. The compose `mcp` service holds **no
-secrets** (only `sync` gets the key + password) and behind the proxy you can add
-`DAYONE_MCP_TOKEN` / `DAYONE_MCP_ALLOWED_ORIGINS` for defense-in-depth.
+the usual self-hosted-MCP bridge pattern. The compose `mcp` service receives no
+Day One upstream credentials (only `sync` gets those). For defense-in-depth,
+choose an explicit MCP auth mode and configure exact Host/Origin allowlists.
 
 Full walkthrough (env/secrets handling, pinning the device id, sync cadence,
 Cloudflare Access, backups): [docs/deployment.md](docs/deployment.md).
@@ -357,10 +370,11 @@ where no real data exists.
 
 ## Security
 
-`dayone-headless` decrypts your **entire** journal. Secrets come only from the
-environment and are never logged or committed; the mirror, exports, and browser
-profile are all gitignored; reads are the only paths. Full threat model and
-deployment rules: [SECURITY.md](SECURITY.md).
+`dayone-headless` decrypts your **entire** journal. Secrets come only from direct
+environment values or their `_FILE` companions and are never logged or
+committed; the mirror, exports, and browser profile are all gitignored; reads are
+the only paths. Full threat model and deployment rules:
+[SECURITY.md](SECURITY.md).
 
 ## Contributing
 

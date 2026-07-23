@@ -184,16 +184,23 @@ test("runMediaJobs: a missing or malformed md5 is skipped up front, never fetche
 test("runMediaJobs: one failed download does not abort the rest", async () => {
   const dir = mkdtempSync(join(tmpdir(), "media-fail-"));
   const { jobs, bytesFor } = syntheticJobs(5);
+  const progress: string[] = [];
   const stats = await runMediaJobs(
     jobs,
     async (job) => {
-      if (job === jobs[2]) throw new Error("network boom");
+      if (job === jobs[2]) {
+        throw new Error("https://token@private.synthetic.test/file /private/synthetic/cache");
+      }
       return bytesFor(job);
     },
-    { concurrency: 3, cacheDir: dir },
+    { concurrency: 3, cacheDir: dir, onProgress: (message) => progress.push(message) },
   );
   expect(stats.failed).toBe(1);
   expect(stats.fetched).toBe(4);
+  expect(progress.join("\n")).not.toContain("token@");
+  expect(progress.join("\n")).not.toContain("/private/synthetic/cache");
+  expect(progress.join("\n")).not.toContain(jobs[2]!.identifier);
+  expect(progress.some((message) => message.includes("download or cache error"))).toBe(true);
 });
 
 const live = process.env.DAYONE_MEDIA_LIVE_TEST === "1";

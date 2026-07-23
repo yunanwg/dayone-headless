@@ -17,12 +17,14 @@ import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { hardenPrivateFile, installPrivateUmask, PRIVATE_FILE_MODE } from "../../local-permissions.ts";
 import { isMediaCached, isValidMd5, prepareMediaPath } from "../../media-cache.ts";
+import { boundedPositiveInteger, MEDIA_CONCURRENCY_BOUNDS } from "../../runtime-config.ts";
 import { openMirror } from "../../serve/db/open.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { runPool } from "./pool.ts";
 import { RestReader } from "./reader.ts";
 
 const md5hex = (b: Uint8Array): string => createHash("md5").update(b).digest("hex");
+export const MAX_MEDIA_JOBS = 100_000;
 
 export interface MediaJob {
   identifier: string;
@@ -53,12 +55,12 @@ export interface MediaSyncOptions {
   onProgress?: (msg: string) => void;
 }
 
-const DEFAULT_MEDIA_CONCURRENCY = 6;
-
 function resolveConcurrency(opts: MediaSyncOptions): number {
-  if (opts.concurrency !== undefined) return Math.max(1, opts.concurrency);
-  const fromEnv = Number(process.env.DAYONE_MEDIA_CONCURRENCY);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : DEFAULT_MEDIA_CONCURRENCY;
+  return boundedPositiveInteger(
+    "DAYONE_MEDIA_CONCURRENCY",
+    opts.concurrency ?? process.env.DAYONE_MEDIA_CONCURRENCY,
+    MEDIA_CONCURRENCY_BOUNDS,
+  );
 }
 
 /** Read the media worklist (identifier + plaintext md5 + Day One journal id). */
@@ -69,10 +71,16 @@ function loadJobs(entryUuid?: string): MediaJob[] {
     .query(
       `SELECT m.identifier, m.md5, m.kind, es.journal_id AS journalId
        FROM media m JOIN entry_sync es ON es.uuid = m.entry_uuid
-       ${where}`,
+       ${where}
+       LIMIT $limit`,
     )
-    .all(entryUuid ? { $uuid: entryUuid } : {}) as MediaJob[];
+    .all(
+      entryUuid ? { $uuid: entryUuid, $limit: MAX_MEDIA_JOBS + 1 } : { $limit: MAX_MEDIA_JOBS + 1 },
+    ) as MediaJob[];
   db.close();
+  if (jobs.length > MAX_MEDIA_JOBS) {
+    throw new RangeError(`media worklist exceeded the ${MAX_MEDIA_JOBS}-item safety limit`);
+  }
   return jobs;
 }
 
@@ -126,7 +134,7 @@ export async function runMediaJobs(
       const bytes = await fetchBytes(job);
       if (md5hex(bytes) !== job.md5) {
         stats.md5Mismatch++;
-        opts.onProgress?.(`md5 mismatch for ${job.kind} ${job.identifier.slice(0, 8)}… — not cached`);
+        opts.onProgress?.(`md5 mismatch for ${job.kind} attachment — not cached`);
         return;
       }
       const path = prepareMediaPath(job.md5, opts.cacheDir);
@@ -135,11 +143,13 @@ export async function runMediaJobs(
       hardenPrivateFile(path);
       stats.fetched++;
       stats.bytes += bytes.length;
-      opts.onProgress?.(`cached ${job.kind} ${job.identifier.slice(0, 8)}… (${bytes.length} B)`);
-    } catch (err) {
+      opts.onProgress?.(`cached ${job.kind} attachment (${bytes.length} B)`);
+    } catch {
       // One failed download must not abort the rest of the pool.
       stats.failed++;
-      opts.onProgress?.(`failed ${job.identifier.slice(0, 8)}…: ${(err as Error).message}`);
+      // Do not forward fetch/crypto/filesystem error strings: they may contain
+      // signed URLs, credentials, or private host paths.
+      opts.onProgress?.(`failed ${job.kind} attachment — download or cache error`);
     }
   });
   return stats;
@@ -147,11 +157,15 @@ export async function runMediaJobs(
 
 export async function syncMedia(masterKey: string, opts: MediaSyncOptions = {}): Promise<MediaSyncStats> {
   const jobs = loadJobs(opts.entryUuid);
+  const concurrency = resolveConcurrency(opts);
 
   const api = new DayOneApi(apiConfigFromEnv());
   await api.ensureToken();
   const reader = new RestReader(api, masterKey);
   const keys = await reader.unlockKeys();
 
-  return runMediaJobs(jobs, (job) => reader.fetchMedia(job.journalId, job.identifier, keys), opts);
+  return runMediaJobs(jobs, (job) => reader.fetchMedia(job.journalId, job.identifier, keys), {
+    ...opts,
+    concurrency,
+  });
 }

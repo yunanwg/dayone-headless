@@ -54,7 +54,7 @@ test("official stdio client follows sample_entries into guarded and ordinary get
     env: {
       ...getDefaultEnvironment(),
       DAYONE_MIRROR: mirrorPath,
-      DAYONE_MIRROR_WAIT: "0",
+      DAYONE_MIRROR_WAIT: "1",
     },
     stderr: "pipe",
   });

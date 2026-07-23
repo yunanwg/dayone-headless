@@ -4,8 +4,11 @@
  * refreshes it (REST ingester); `mcp` serves it over MCP; `doctor` self-checks.
  *
  *   daytwo sync                 fetch + decrypt + write the mirror (needs env)
+ *   daytwo sync-loop            periodically sync (container internal command)
  *   daytwo media-fetch [uuid]   fetch + decrypt attachment BYTES into data/media
  *   daytwo mcp                  run the read-only MCP server (stdio)
+ *   daytwo health-sync          check recorded sync outcome + freshness
+ *   daytwo health-mcp           probe canonical HTTP MCP readiness
  *   daytwo doctor               check config + mirror health
  *   daytwo doctor --fix-permissions  tighten existing local plaintext paths
  *   daytwo sync-status          show last attempt + last complete sync state
@@ -28,6 +31,8 @@
  */
 
 import { existsSync } from "node:fs";
+import { boundedPositiveInteger, SYNC_INTERVAL_BOUNDS } from "../runtime-config.ts";
+import { requireSecret } from "../secret-config.ts";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
 import { SnapshotValidationError, sampleEntries } from "./evidence.ts";
 import {
@@ -59,6 +64,18 @@ function requireMirror() {
     process.exit(2);
   }
   return openMirror();
+}
+
+async function runSyncOnce(): Promise<void> {
+  const { sync } = await import("../ingest/rest/sync.ts");
+  const key = requireSecret("DAYONE_ENCRYPTION_KEY");
+  const t0 = Date.now();
+  const result = await sync(key, { onProgress: (message) => console.error(message) });
+  console.error(
+    `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${result.changed} changed, ` +
+      `-${result.removed} removed, ${result.failed} failed → mirror ` +
+      `(${result.status}; last complete ${result.lastCompleteAt ?? "never"})`,
+  );
 }
 
 /** Parse `--key value` / `--flag` pairs into the listEntries filter shape. */
@@ -121,22 +138,46 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 switch (cmd) {
   case "sync": {
-    const { sync } = await import("../ingest/rest/sync.ts");
-    const key = process.env.DAYONE_ENCRYPTION_KEY;
-    if (!key) throw new Error("set DAYONE_ENCRYPTION_KEY (the D1-<userId>-<code…> encryption key)");
-    const t0 = Date.now();
-    const r = await sync(key, { onProgress: (m) => console.error(m) });
-    console.error(
-      `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${r.changed} changed, -${r.removed} removed, ` +
-        `${r.failed} failed → mirror (${r.status}; last complete ${r.lastCompleteAt ?? "never"})`,
+    await runSyncOnce();
+    break;
+  }
+
+  case "sync-loop": {
+    const intervalSeconds = boundedPositiveInteger(
+      "DAYONE_SYNC_INTERVAL",
+      process.env.DAYONE_SYNC_INTERVAL,
+      SYNC_INTERVAL_BOUNDS,
     );
+    while (true) {
+      try {
+        await runSyncOnce();
+      } catch {
+        console.error("sync failed; retrying next cycle");
+      }
+      await Bun.sleep(intervalSeconds * 1000);
+    }
+    break;
+  }
+
+  case "health-sync": {
+    const { syncReadiness } = await import("./health.ts");
+    const result = syncReadiness();
+    console.error(`${result.ready ? "ready" : "not ready"}: ${result.detail}`);
+    process.exit(result.ready ? 0 : 1);
+    break;
+  }
+
+  case "health-mcp": {
+    const { mcpHttpReadiness } = await import("./health.ts");
+    const result = await mcpHttpReadiness();
+    console.error(`${result.ready ? "ready" : "not ready"}: ${result.detail}`);
+    process.exit(result.ready ? 0 : 1);
     break;
   }
 
   case "media-fetch": {
     const { syncMedia } = await import("../ingest/rest/media.ts");
-    const key = process.env.DAYONE_ENCRYPTION_KEY;
-    if (!key) throw new Error("set DAYONE_ENCRYPTION_KEY (the D1-<userId>-<code…> encryption key)");
+    const key = requireSecret("DAYONE_ENCRYPTION_KEY");
     // `media-fetch <uuid>` scopes to one entry; `--limit N` caps new downloads.
     const uuid = rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined;
     const li = rest.indexOf("--limit");
@@ -157,12 +198,17 @@ switch (cmd) {
 
   case "doctor": {
     const { doctor } = await import("./doctor.ts");
-    const unknown = rest.filter((arg) => arg !== "--fix-permissions");
+    const unknown = rest.filter((arg) => arg !== "--fix-permissions" && arg !== "--serving");
     if (unknown.length) {
       console.error(`unknown doctor option: ${unknown[0]}`);
       process.exit(1);
     }
-    process.exit(await doctor({ fixPermissions: rest.includes("--fix-permissions") }));
+    process.exit(
+      await doctor({
+        fixPermissions: rest.includes("--fix-permissions"),
+        servingOnly: rest.includes("--serving"),
+      }),
+    );
     break;
   }
 
@@ -347,7 +393,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | sync-status | media-fetch [uuid] | mcp | doctor | journals | stats <year|month|journal> | sample [target] [--best-effort] | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
+      "commands: sync | sync-loop | sync-status | media-fetch [uuid] | mcp | health-sync | health-mcp | doctor | journals | stats <year|month|journal> | sample [target] [--best-effort] | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }

@@ -163,6 +163,26 @@ test("a first degraded attempt has no complete freshness timestamp", async () =>
   });
 });
 
+test("sync progress reports counts without journal names or entry identifiers", async () => {
+  const path = mirrorPath();
+  const progress: string[] = [];
+  const reader = fakeReader(
+    () => [ref("PRIVATE-ENTRY-ID", "r1")],
+    async (entryId) => content(entryId),
+  );
+  await sync("synthetic-key", {
+    mirrorPath: path,
+    nowIso: "2026-02-02T00:00:00.000Z",
+    reader,
+    onProgress: (message) => progress.push(message),
+  });
+  const output = progress.join("\n");
+  expect(output).toContain("journal 1");
+  expect(output).not.toContain("synthetic-journal");
+  expect(output).not.toContain("SYNTHETIC-JOURNAL");
+  expect(output).not.toContain("PRIVATE-ENTRY-ID");
+});
+
 test("a legacy synced_at-only mirror is reported as complete", () => {
   const db = openMirror(":memory:", { writable: true });
   db.query("INSERT INTO meta (key, value) VALUES ('synced_at', ?1)").run("2025-12-31T00:00:00.000Z");
