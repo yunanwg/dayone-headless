@@ -26,13 +26,26 @@ import { importExport } from "../json-export/import.ts";
 import { apiConfigFromEnv, DayOneApi } from "./api.ts";
 import { mapEntry } from "./map.ts";
 import { runPool } from "./pool.ts";
-import { type EntryRef, RestReader } from "./reader.ts";
+import { type DecryptedEntryContent, type EntryRef, type JournalKeys, RestReader } from "./reader.ts";
+
+/** Per-run tally of D1 envelope-signature outcomes across all decrypted entries. */
+export interface SignatureCounters {
+  verified: number;
+  unsigned: number;
+  failed: number;
+}
 
 export interface SyncResult {
   journals: number;
   changed: number;
   removed: number;
   failed: number;
+  /** Entries whose envelope signature verified against the journal public key. */
+  signatureVerified: number;
+  /** Entries carrying no signature (documented for server-created content). */
+  signatureUnsigned: number;
+  /** Entries whose signature was present but did not verify (or lacked a key). */
+  signatureFailed: number;
   status: Exclude<SyncState, "unknown" | "running" | "failed">;
   lastAttemptAt: string;
   lastCompleteAt: string | null;
@@ -40,7 +53,20 @@ export interface SyncResult {
   syncedAt: string | null;
 }
 
-type SyncReader = Pick<RestReader, "unlockKeys" | "decryptJournalName" | "listEntries" | "decryptEntry">;
+/** What a reader's `decryptEntry` may return: content-only (fakes) or content + outcome. */
+type DecryptEntryOutput = string | DecryptedEntryContent | null;
+
+interface SyncReader {
+  unlockKeys: RestReader["unlockKeys"];
+  decryptJournalName: RestReader["decryptJournalName"];
+  listEntries: RestReader["listEntries"];
+  decryptEntry(journalId: string, entryId: string, keys: JournalKeys): Promise<DecryptEntryOutput>;
+}
+
+/** True when the run must fail-closed on missing/invalid signatures. */
+export function requireSignaturesFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.DAYONE_REQUIRE_SIGNATURES === "1";
+}
 export const MAX_SYNC_ENTRY_REFS = 100_000;
 export const MAX_MAPPED_SOURCE_BYTES_PER_JOURNAL = 64 * 1024 * 1024;
 
@@ -65,32 +91,59 @@ function resolveConcurrency(opts: { concurrency?: number }): number {
  */
 export async function fetchChangedEntries(
   toFetch: readonly EntryRef[],
-  decrypt: (r: EntryRef) => Promise<string | null>,
+  decrypt: (r: EntryRef) => Promise<DecryptEntryOutput>,
   concurrency: number,
   maximumMappedSourceBytes = MAX_MAPPED_SOURCE_BYTES_PER_JOURNAL,
+  signatureOptions: {
+    /** Fail-closed: skip writing entries whose signature is missing or invalid. */
+    requireSignatures?: boolean;
+    /** Mutated in place with each entry's signature outcome (verified/unsigned/failed). */
+    signatures?: SignatureCounters;
+    /** Warn sink for signature problems — receives a uuid-prefix + reason only. */
+    onWarn?: (msg: string) => void;
+  } = {},
 ): Promise<{ mapped: DayOneEntry[]; done: EntryRef[]; failed: number }> {
   if (!Number.isSafeInteger(maximumMappedSourceBytes) || maximumMappedSourceBytes < 1) {
     throw new RangeError("maximum mapped source bytes must be a positive safe integer");
   }
+  const { requireSignatures = false, signatures, onWarn } = signatureOptions;
   const mapped: DayOneEntry[] = [];
   const done: EntryRef[] = [];
   let failed = 0;
   let retainedSourceBytes = 0;
   await runPool(toFetch, concurrency, async (r) => {
     try {
-      const content = await decrypt(r);
-      if (content) {
-        const contentBytes = Buffer.byteLength(content, "utf8");
-        if (retainedSourceBytes + contentBytes > maximumMappedSourceBytes) {
-          failed++;
-          return;
-        }
-        retainedSourceBytes += contentBytes;
-        mapped.push(mapEntry(JSON.parse(content), { editDate: r.editDate }));
-        done.push(r);
-      } else {
+      const out = await decrypt(r);
+      const content = typeof out === "string" ? out : (out?.content ?? null);
+      const disposition = out && typeof out !== "string" ? out.signature : undefined;
+      if (!content) {
         failed++;
+        return;
       }
+      // Count the signature outcome and, under fail-closed policy, skip writing
+      // any entry that is not "verified". Warnings carry only a uuid PREFIX and a
+      // reason — never entry content or the full identifier.
+      if (disposition) {
+        if (signatures) signatures[disposition]++;
+        if (disposition === "failed") {
+          onWarn?.(
+            `  signature: entry ${r.entryId.slice(0, 8)} verification failed${
+              requireSignatures ? " (skipped)" : ""
+            }`,
+          );
+        } else if (disposition === "unsigned" && requireSignatures) {
+          onWarn?.(`  signature: entry ${r.entryId.slice(0, 8)} unsigned (skipped)`);
+        }
+        if (requireSignatures && disposition !== "verified") return; // fail-closed: not written
+      }
+      const contentBytes = Buffer.byteLength(content, "utf8");
+      if (retainedSourceBytes + contentBytes > maximumMappedSourceBytes) {
+        failed++;
+        return;
+      }
+      retainedSourceBytes += contentBytes;
+      mapped.push(mapEntry(JSON.parse(content), { editDate: r.editDate }));
+      done.push(r);
     } catch {
       failed++;
     }
@@ -118,8 +171,13 @@ export async function sync(
   let failed = 0;
   try {
     const reader: SyncReader = opts.reader ?? new RestReader(new DayOneApi(apiConfigFromEnv()), masterKey);
+    const requireSignatures = requireSignaturesFromEnv();
+    const signatures: SignatureCounters = { verified: 0, unsigned: 0, failed: 0 };
     const keys = await reader.unlockKeys();
-    log(`unlocked ${keys.journalPrivByFingerprint.size} journal key(s)`);
+    log(
+      `unlocked ${keys.journalPrivByFingerprint.size} journal key(s)` +
+        (requireSignatures ? " (signatures required)" : ""),
+    );
 
     const setSync = db.query(
       "INSERT INTO entry_sync (uuid, journal_id, revision_id) VALUES (?1, ?2, ?3) " +
@@ -173,6 +231,8 @@ export async function sync(
         toFetch,
         (r) => reader.decryptEntry(j.id, r.entryId, keys),
         concurrency,
+        MAX_MAPPED_SOURCE_BYTES_PER_JOURNAL,
+        { requireSignatures, signatures, onWarn: log },
       );
       const { mapped, done } = result;
       failed += result.failed;
@@ -189,6 +249,10 @@ export async function sync(
       );
     }
 
+    log(
+      `signatures: ${signatures.verified} verified, ${signatures.unsigned} unsigned, ` +
+        `${signatures.failed} failed`,
+    );
     const status = failed === 0 ? "complete" : "degraded";
     const recorded = recordSyncOutcome(db, {
       status,
@@ -201,6 +265,9 @@ export async function sync(
       changed,
       removed,
       failed,
+      signatureVerified: signatures.verified,
+      signatureUnsigned: signatures.unsigned,
+      signatureFailed: signatures.failed,
       status,
       lastAttemptAt: attemptedAt,
       lastCompleteAt: recorded.last_complete_at,
@@ -226,6 +293,7 @@ if (import.meta.main) {
   console.error(
     `done in ${((Date.now() - t0) / 1000).toFixed(1)}s: +${r.changed} changed, -${r.removed} removed, ` +
       `${r.failed} failed across ${r.journals} journals → mirror ` +
-      `(${r.status}; last_complete_at ${r.lastCompleteAt ?? "never"})`,
+      `(sig: ${r.signatureVerified} verified / ${r.signatureUnsigned} unsigned / ${r.signatureFailed} failed; ` +
+      `${r.status}; last_complete_at ${r.lastCompleteAt ?? "never"})`,
   );
 }

@@ -53,14 +53,37 @@ the journal itself.
 ## Server authenticity (integrity vs. authenticity)
 
 Content **integrity** is enforced: every entry/attachment is AES-GCM sealed under a
-content key wrapped to your key, so tampered ciphertext fails to decrypt. What is
-**not** yet enforced is server **authenticity**. The D1 envelope carries a signature
-(`type ≠ 0`), but the current code parses and skips it (`src/ingest/rest/d1.ts`) —
-it does not verify it. So a compromised or impersonated Day One server could serve
-**forged content** that still decrypts cleanly under the wrapped content key; we
-would not detect the forgery from the signature. The practical mitigations today
-are transport trust (HTTPS to Day One) and the byte-identical JSON-export
-conformance oracle. Verifying the envelope signature is a known gap.
+content key wrapped to your key, so tampered ciphertext fails to decrypt.
+
+Server **authenticity** is now checked too. For type 1/2 envelopes the blob carries
+a SHA256withRSA (RSASSA-PKCS1-v1_5) signature over the 256-byte RSA-wrapped content
+key (`lockedKey`). During sync it is verified against the journal's **public** key
+(`vault.keys[].public_key`, PEM SPKI), selected by the envelope fingerprint (the
+SHA-256 of that key's SPKI DER) — see `src/ingest/rest/d1.ts` (`verifyD1Signature`)
+and `reader.ts`. Each sync run tallies three outcomes and surfaces them in progress
+output and `SyncResult`:
+
+- **verified** — the signature checks out against the journal public key.
+- **unsigned** — no signature is present. Day One documents server-created content
+  as carrying `signatureLength = 0`, so this is expected for some entries.
+- **failed** — a signature is present but does not verify (or no public key is
+  available for its fingerprint).
+
+Policy is configurable:
+
+- **Default (warn-and-keep):** a `failed` entry is logged (uuid prefix + reason
+  only, never content) and still written to the mirror, so a verification
+  regression can never silently drop your journal. This is the pragmatic default
+  while the signing model is still being characterized against a real account.
+- **`DAYONE_REQUIRE_SIGNATURES=1` (fail-closed):** entries whose signature is
+  missing or invalid are **skipped** — not written to the mirror — and counted.
+  Attachments are refused the same way (their bytes never reach the cache).
+
+A residual gap remains: what is authenticated is the wrapped content key, not a
+binding of that key to a specific entry/feed identity, so this does not by itself
+prevent a server from *replaying* a validly-signed key/content pair in an
+unexpected slot. Transport trust (HTTPS) and the byte-identical JSON-export
+conformance oracle remain complementary mitigations.
 
 ## Deploying safely
 

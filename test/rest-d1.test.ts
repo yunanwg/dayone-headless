@@ -4,6 +4,7 @@
  */
 
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { deriveMasterAesKey, parseMasterKey } from "../src/ingest/rest/crypto.ts";
 import {
@@ -29,6 +30,9 @@ const cat = (...a: Uint8Array[]) => {
 };
 const bytes = (...n: number[]) => new Uint8Array(n);
 const rand = (n: number) => crypto.getRandomValues(new Uint8Array(n));
+/** Append the trailing MD5(bytes[0..len)) checksum a real D1 blob carries. */
+const seal = (withoutMd5: Uint8Array) =>
+  cat(withoutMd5, new Uint8Array(createHash("md5").update(withoutMd5).digest()));
 
 async function gcmEncrypt(keyRaw: Uint8Array, iv: Uint8Array, pt: Uint8Array): Promise<Uint8Array> {
   const k = await subtle.importKey("raw", keyRaw as BufferSource, { name: "AES-GCM" }, false, ["encrypt"]);
@@ -48,12 +52,10 @@ async function toPem(priv: CryptoKey): Promise<string> {
   const b64 = btoa(String.fromCharCode(...der)).replace(/(.{64})/g, "$1\n");
   return `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`;
 }
-const md5pad = bytes(...new Array(16).fill(0)); // parser strips it; content irrelevant
-
 test("parseD1 slices type-00 and type-02 layouts correctly", () => {
   const iv = rand(12),
     body = rand(40);
-  const t0 = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, body, md5pad);
+  const t0 = seal(cat(bytes(0x44, 0x31, 0x01, 0x00), iv, body));
   const p0 = parseD1(t0);
   expect(p0.type).toBe(0);
   expect([...p0.iv]).toEqual([...iv]);
@@ -61,7 +63,7 @@ test("parseD1 slices type-00 and type-02 layouts correctly", () => {
 
   const fp = rand(32),
     locked = rand(256);
-  const t2 = cat(bytes(0x44, 0x31, 0x01, 0x02), fp, bytes(0x00, 0x00), locked, iv, body, md5pad);
+  const t2 = seal(cat(bytes(0x44, 0x31, 0x01, 0x02), fp, bytes(0x00, 0x00), locked, iv, body));
   const p2 = parseD1(t2);
   expect(p2.type).toBe(2);
   expect(p2.lockedKey).toHaveLength(256);
@@ -74,7 +76,7 @@ test("decryptJournalPrivateKey (type-00) recovers a usable RSA key", async () =>
   const vaultKey = rand(32);
   const iv = rand(12);
   const pem = new TextEncoder().encode(await toPem(journal.privateKey));
-  const blob = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(vaultKey, iv, pem), md5pad);
+  const blob = seal(cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(vaultKey, iv, pem)));
 
   const recovered = await decryptJournalPrivateKey(vaultKey, blob);
   // Prove it's the same key: unwrap something wrapped to the journal's public key.
@@ -91,14 +93,15 @@ test("decryptEntryContent (type-02) recovers plaintext, incl. gzip + JSON-header
   const iv = rand(12);
   const known = "rest-synthetic-entry-plaintext-日记";
   const gz = new Uint8Array(gzipSync(new TextEncoder().encode(known)));
-  const d1 = cat(
-    bytes(0x44, 0x31, 0x01, 0x02),
-    rand(32),
-    bytes(0, 0),
-    lockedKey,
-    iv,
-    await gcmEncrypt(contentKey, iv, gz),
-    md5pad,
+  const d1 = seal(
+    cat(
+      bytes(0x44, 0x31, 0x01, 0x02),
+      rand(32),
+      bytes(0, 0),
+      lockedKey,
+      iv,
+      await gcmEncrypt(contentKey, iv, gz),
+    ),
   );
   // Prepend a JSON header ‖ \n like getEntryContent() returns.
   const blob = cat(new TextEncoder().encode('{"revision":{"entryId":"X"}}'), bytes(0x0a), d1);
@@ -124,7 +127,7 @@ test("decryptUserPrivateKey (master key → PBKDF2 → type-00) recovers the use
 
   const iv = rand(12);
   const pem = new TextEncoder().encode(await toPem(user.privateKey));
-  const blob = cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(keyRaw, iv, pem), md5pad);
+  const blob = seal(cat(bytes(0x44, 0x31, 0x01, 0x00), iv, await gcmEncrypt(keyRaw, iv, pem)));
 
   const recovered = await decryptUserPrivateKey(masterKey, blob);
   const secret = rand(32);

@@ -112,6 +112,18 @@ md5          len-16 .. len    ← MD5(bytes[0..len-16]); STRIP before AES-GCM
 WebCrypto AES-GCM wants `cipherText ‖ gcmTag` as data + `iv` separate. AAD = none.
 An entry content blob = `<JSON revision header>` ‖ `\n` ‖ `<D1 type-02>` (`contentLength` = the D1 part).
 
+**Signature (server authenticity).** For type 1/2 the `signature` field is a
+SHA256withRSA (RSASSA-PKCS1-v1_5) signature over the 256-byte `lockedKey`,
+verifiable with the journal **public** key (`vault.keys[].public_key`, PEM SPKI),
+selected by the envelope `fingerprint` = **SHA-256 of that key's SPKI DER**
+(fingerprint derivation validated against a real account). `parseD1` exposes it and
+`verifyD1Signature` checks it; the sync read path verifies present signatures by
+default (counting verified/unsigned/failed) and, under `DAYONE_REQUIRE_SIGNATURES=1`,
+skips entries/attachments that do not verify. `signatureLength = 0` marks
+server-created content that is legitimately unsigned. The trailing MD5 is a format
+checksum (verified during parsing), **not** a security boundary — AES-GCM
+authenticates the ciphertext and the signature authenticates the wrapped key.
+
 ## How the former blocker was solved
 
 The oracle-validated vault key kept failing to AES-GCM-decrypt the type-00 journal

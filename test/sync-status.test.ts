@@ -39,6 +39,7 @@ function fakeReader(getRefs: () => EntryRef[], decrypt: (entryId: string) => Pro
     unlockKeys: async () => ({
       userPriv: {} as CryptoKey,
       journalPrivByFingerprint: new Map<string, CryptoKey>(),
+      journalPubByFingerprint: new Map<string, CryptoKey>(),
       vaultKeyByJournalId: new Map<string, Uint8Array>(),
       journals: [
         {
