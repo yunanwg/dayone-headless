@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/) once it cuts its first tagged release.
 
+## [0.1.2](https://github.com/yunanwg/dayone-headless/compare/v0.1.1...v0.1.2) (2026-07-24)
+
+
+### Features
+
+* **serve:** add CJK search, corpus stats, and batch reads ([#27](https://github.com/yunanwg/dayone-headless/issues/27)) ([c2c01c0](https://github.com/yunanwg/dayone-headless/commit/c2c01c0a9ccd7ec567a34bee5841c8c7fcbeab34))
+* **serve:** plan snapshot-bound evidence coverage ([#36](https://github.com/yunanwg/dayone-headless/issues/36)) ([e54d9ad](https://github.com/yunanwg/dayone-headless/commit/e54d9ad46ea8ef65ba1e8c2c3659ba6e6da1a03d))
+
+
+### Bug Fixes
+
+* **ingest:** fully reconcile JSON re-imports ([#29](https://github.com/yunanwg/dayone-headless/issues/29)) ([ad4ce5e](https://github.com/yunanwg/dayone-headless/commit/ad4ce5e94909641231ab63077ba04fef2dadbfb2))
+* **ingest:** tolerate inline binary in the entries feed ([#42](https://github.com/yunanwg/dayone-headless/issues/42)) ([c5bda48](https://github.com/yunanwg/dayone-headless/commit/c5bda48fb32f3cfb9c18e17dff81418b5c391abd))
+* **ingest:** verify D1 envelope signatures ([#41](https://github.com/yunanwg/dayone-headless/issues/41)) ([837093f](https://github.com/yunanwg/dayone-headless/commit/837093feb583e1a3edf1e7d00de84cb953f555c3))
+* **mcp:** bound and redact media responses ([#34](https://github.com/yunanwg/dayone-headless/issues/34)) ([443a54f](https://github.com/yunanwg/dayone-headless/commit/443a54f89b8cceb3b9bc89d1fa945b743c94fe94))
+* **mcp:** make HTTP transport stateless ([#35](https://github.com/yunanwg/dayone-headless/issues/35)) ([d507614](https://github.com/yunanwg/dayone-headless/commit/d50761467c7dcc4dde6ebe26c9dd2effd3654959))
+* **security:** harden HTTP transport, md5 path guard, query safety ([#24](https://github.com/yunanwg/dayone-headless/issues/24)) ([7eb5a44](https://github.com/yunanwg/dayone-headless/commit/7eb5a44c4da986c86a3879cd96499ada2b34ac79))
+* **security:** harden remote MCP deployment ([#37](https://github.com/yunanwg/dayone-headless/issues/37)) ([16fd6a0](https://github.com/yunanwg/dayone-headless/commit/16fd6a0a346b12c3244a073fc314a38d5ced588d))
+* **security:** make local plaintext storage owner-only ([#31](https://github.com/yunanwg/dayone-headless/issues/31)) ([06a44d9](https://github.com/yunanwg/dayone-headless/commit/06a44d948c1b166d039a236df9d605377f7f4066))
+* **serve:** bound bulk journal responses ([#33](https://github.com/yunanwg/dayone-headless/issues/33)) ([cda9f4d](https://github.com/yunanwg/dayone-headless/commit/cda9f4df7ff9fa0b6898c1106b4f64e79dda4ec2))
+* **sync:** surface degraded mirror completeness ([#30](https://github.com/yunanwg/dayone-headless/issues/30)) ([e9f7677](https://github.com/yunanwg/dayone-headless/commit/e9f7677190f3fe44b0edc7521c030c16e98d14b2))
+
+
+### Performance Improvements
+
+* **ingest:** batch FTS cleanup during re-import ([#32](https://github.com/yunanwg/dayone-headless/issues/32)) ([bc5f37e](https://github.com/yunanwg/dayone-headless/commit/bc5f37ecbd337e36b8d4b5b0434ac7fa8f8ec58e))
+* quick-win fixes from the perf audit ([#23](https://github.com/yunanwg/dayone-headless/issues/23)) ([0a8851b](https://github.com/yunanwg/dayone-headless/commit/0a8851b6c91092485c4c6cb0f17daad37ccdaa84))
+* **sync:** replace fixed-slice barrier with bounded worker pool ([#26](https://github.com/yunanwg/dayone-headless/issues/26)) ([dc2a16d](https://github.com/yunanwg/dayone-headless/commit/dc2a16d68b6cafc3abd7aebc4dab21fb726920a8))
+
 ## [0.1.1](https://github.com/yunanwg/dayone-headless/compare/v0.1.0...v0.1.1) (2026-07-23)
 
 
