@@ -17,19 +17,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { boundedPositiveInteger, MCP_CONCURRENCY_BOUNDS, MIRROR_WAIT_BOUNDS } from "../runtime-config.ts";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
-import {
-  COVERAGE_JOURNAL_MAX,
-  COVERAGE_MONTH_MAX,
-  COVERAGE_QUARTER_MAX,
-  COVERAGE_YEAR_MAX,
-  getEntriesAtSnapshot,
-  SAMPLE_TARGET_DEFAULT,
-  SAMPLE_TARGET_MAX,
-  SAMPLE_TARGET_MIN,
-  SNAPSHOT_TOKEN_MAX_CHARS,
-  SnapshotValidationError,
-  sampleEntries,
-} from "./evidence.ts";
 import { httpGateConfigFromEnv } from "./http-auth.ts";
 import {
   handleStatelessMcpHttpRequest,
@@ -63,8 +50,11 @@ import {
   listTags,
   onThisDay,
   resolveMedia,
+  SAMPLE_ENTRIES_DEFAULT,
+  SAMPLE_ENTRIES_MAX,
   SEARCH_QUERY_MAX_CHARS,
   SEARCH_QUERY_MAX_TERMS,
+  sampleEntries,
   searchEntries,
   TEXT_BUDGET_MAX_PER_ENTRY_CHARS,
   TEXT_BUDGET_MAX_TOTAL_CHARS,
@@ -91,23 +81,6 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 });
-const snapshotError = (error: SnapshotValidationError) => ({
-  content: [
-    {
-      type: "text" as const,
-      text: JSON.stringify(
-        {
-          error: error.code,
-          message: error.message,
-          current_sync_status: error.current,
-        },
-        null,
-        2,
-      ),
-    },
-  ],
-  isError: true,
-});
 
 const todayMonthDay = () => {
   const n = new Date();
@@ -124,11 +97,11 @@ function buildServer(): McpServer {
         "'when did I write most'), call get_stats FIRST — it maps the whole corpus (counts, date " +
         "span, text volume by year/month/journal) without reading a word. Then find entries with " +
         "search_entries (keyword/phrase; handles Chinese and other CJK text) or list_entries " +
-        "(filter by journal/tag/date/place/starred; include_text to read bodies in bulk). Read " +
-        "For evidence-backed longitudinal analysis, call sample_entries to get metadata-only " +
-        "coverage, a snapshot_token, and UUID read batches. Read those batches with get_entries " +
-        "using the same token. For ad-hoc content use get_entry (one, curated). get_entries reads up to " +
-        `${GET_ENTRIES_MAX}, with explicit per-entry and combined text budgets). Browse facets with list_journals ` +
+        "(filter by journal/tag/date/place/starred; include_text to read bodies in bulk). For an even, " +
+        "reproducible longitudinal read, call sample_entries — the stratified-coverage complement to " +
+        "get_stats — then feed its uuids straight to get_entries. For ad-hoc content use get_entry (one, " +
+        `curated) or get_entries (up to ${GET_ENTRIES_MAX} uuids, with explicit per-entry and combined text ` +
+        "budgets). Browse facets with list_journals " +
         "/ list_tags; get an attachment's bytes with get_media. Call get_sync_status to verify " +
         "completeness; read results retain `synced_at` and add `sync_status` freshness metadata. " +
         "READ-ONLY — you cannot create or edit entries.",
@@ -139,31 +112,28 @@ function buildServer(): McpServer {
     "sample_entries",
     {
       description:
-        "Plan a deterministic, metadata-only evidence sample across the entire corpus. Returns NO " +
-        "entry text or snippets: only UUID/date/journal/flags/text length, stable evidence_ref values, " +
-        "population totals, year/quarter/month + journal/marked coverage, known-bias warnings, a " +
-        "snapshot_token, and get_entries-ready UUID batches. Optional journal/tag/starred/date/place " +
-        "filters scope candidates, population, and coverage together. Coverage is response-bounded " +
-        `(journals ${COVERAGE_JOURNAL_MAX}, years ${COVERAGE_YEAR_MAX}, quarters ` +
-        `${COVERAGE_QUARTER_MAX}, months ${COVERAGE_MONTH_MAX}) and each dimension reports ` +
-        "total/returned/omitted/truncated. Bounded journal labels carry collision-safe journal_ref " +
-        "values. complete_only is the safe default. best_effort permits a stable degraded mirror " +
-        "but emits a prominent failed-entry warning. Running, failed, and unknown mirrors are rejected.",
+        "Deterministic, even, metadata-only coverage sample for longitudinal reading — the " +
+        "stratified-coverage complement to get_stats. get_stats shows the SHAPE of the corpus; " +
+        "sample_entries hands you a reproducible slice to actually read. It allocates n entries across " +
+        "strata (by year by default, for decade-scale coverage; or month; or none) proportionally to " +
+        "each stratum's size — every non-empty stratum gets at least one while the budget allows, oldest " +
+        "first — and within each stratum picks evenly spaced entries. No randomness: the same mirror and " +
+        "arguments always return the same uuids, in chronological order. Returns ordinary metadata-only " +
+        "entry summaries (uuid, creation_date, journal, tags, starred, text_length, place_name) and NO " +
+        "entry text — feed the uuids straight to get_entries to read bodies. Optional " +
+        "journal/tag/starred/date/place filters scope the sample the same way they scope list_entries.",
       inputSchema: {
-        target: z
+        n: z
           .number()
           .int()
-          .min(SAMPLE_TARGET_MIN)
-          .max(SAMPLE_TARGET_MAX)
-          .default(SAMPLE_TARGET_DEFAULT)
-          .describe(
-            `maximum evidence entries (default ${SAMPLE_TARGET_DEFAULT}, ` +
-              `range ${SAMPLE_TARGET_MIN}-${SAMPLE_TARGET_MAX})`,
-          ),
-        mode: z
-          .enum(["complete_only", "best_effort"])
-          .default("complete_only")
-          .describe("complete_only rejects degraded mirrors; best_effort permits them with a warning"),
+          .min(1)
+          .max(SAMPLE_ENTRIES_MAX)
+          .default(SAMPLE_ENTRIES_DEFAULT)
+          .describe(`entries to sample (default ${SAMPLE_ENTRIES_DEFAULT}, max ${SAMPLE_ENTRIES_MAX})`),
+        stratify_by: z
+          .enum(["year", "month", "none"])
+          .default("year")
+          .describe("coverage dimension: 'year' (default), 'month', or 'none' (one pooled stratum)"),
         journal: z.string().optional().describe("exact journal name (see list_journals)"),
         tag: z.string().optional().describe("exact tag name (see list_tags)"),
         starred: z.boolean().optional().describe("only starred entries when true"),
@@ -173,14 +143,8 @@ function buildServer(): McpServer {
       },
       annotations: READ_ONLY,
     },
-    async ({ target, mode, ...filters }) => {
-      try {
-        return json(sampleEntries(db, { target, mode, ...filters }));
-      } catch (error) {
-        if (error instanceof SnapshotValidationError) return snapshotError(error);
-        throw error;
-      }
-    },
+    async ({ n, stratify_by, ...filters }) =>
+      json({ ...getFreshness(db), entries: sampleEntries(db, n, stratify_by, filters) }),
   );
 
   server.registerTool(
@@ -395,20 +359,13 @@ function buildServer(): McpServer {
         "search_entries / list_entries instead of many get_entry calls. Bodies are bounded per " +
         "entry and across the batch, with explicit Unicode-code-point truncation metadata on every " +
         "item. Unknown uuids come back in `missing`, never as an error. Heavy rich-text/raw fields " +
-        "are intentionally single-entry get_entry options. Pass sample_entries' snapshot_token for " +
-        "a guarded longitudinal evidence read; omitting it preserves ordinary unguarded batch reads.",
+        "are intentionally single-entry get_entry options.",
       inputSchema: {
         uuids: z
           .array(z.string().max(ENTRY_UUID_MAX_CHARS))
           .min(1)
           .max(GET_ENTRIES_MAX)
           .describe(`entry uuids, in the order you want them back (max ${GET_ENTRIES_MAX})`),
-        snapshot_token: z
-          .string()
-          .min(1)
-          .max(SNAPSHOT_TOKEN_MAX_CHARS)
-          .optional()
-          .describe("optional opaque token from sample_entries; enables guarded snapshot validation"),
         max_chars: z
           .number()
           .int()
@@ -440,7 +397,7 @@ function buildServer(): McpServer {
       },
       annotations: READ_ONLY,
     },
-    async ({ uuids, snapshot_token, max_chars, max_total_chars, include_rich_text, include_raw }) => {
+    async ({ uuids, max_chars, max_total_chars, include_rich_text, include_raw }) => {
       if (include_rich_text || include_raw) {
         return {
           content: [
@@ -454,30 +411,13 @@ function buildServer(): McpServer {
           isError: true,
         };
       }
-      if (snapshot_token !== undefined) {
-        try {
-          return json(
-            getEntriesAtSnapshot(db, snapshot_token, uuids, {
-              maxChars: max_chars,
-              maxTotalChars: max_total_chars,
-            }),
-          );
-        } catch (error) {
-          if (error instanceof SnapshotValidationError) return snapshotError(error);
-          throw error;
-        }
-      }
-      return json(
-        db.transaction(() => ({
-          ...getFreshness(db),
-          snapshot: null,
-          snapshot_guarantee: "none",
-          ...getEntries(db, uuids, {
-            maxChars: max_chars,
-            maxTotalChars: max_total_chars,
-          }),
-        }))(),
-      );
+      return json({
+        ...getFreshness(db),
+        ...getEntries(db, uuids, {
+          maxChars: max_chars,
+          maxTotalChars: max_total_chars,
+        }),
+      });
     },
   );
 

@@ -28,9 +28,9 @@ it as a clean CLI and MCP server over a local, decrypted **mirror**.
 - **Read-only MCP server** — `get_stats`, `list_journals`, `list_tags`,
   `search_entries`, `list_entries`, `sample_entries`, `get_entry`, `get_entries`,
   `on_this_day`, plus media tools. Analysis-grade: `get_stats` maps a decade
-  without reading a word; deterministic evidence sampling makes time/journal
-  coverage and known biases explicit before bounded full-text reads. Every
-  result carries `synced_at` so an agent knows how fresh the data is.
+  without reading a word; `sample_entries` returns a deterministic, evenly
+  stratified slice of the corpus to read next. Every result carries `synced_at`
+  so an agent knows how fresh the data is.
 - **CLI** — the same reads plus `sync` and a `doctor` health check.
 - **No Mac, no browser in production** — the shipping ingester is pure HTTPS +
   our own crypto. The Docker image contains no Chromium.
@@ -106,7 +106,7 @@ The single `daytwo` dispatcher (`src/serve/cli.ts`; also the `daytwo` bin):
 | `daytwo doctor --fix-permissions` | Explicitly tighten existing mirror/cache paths after reviewing the diagnostic. |
 | `daytwo journals` | List journals with entry counts and freshness. |
 | `daytwo stats <year\|month\|journal> [filters]` | Corpus map: entry counts, date span, and text volume per bucket. The cheap first look for a longitudinal question. |
-| `daytwo sample [target] [--best-effort] [filters]` | Deterministic metadata-only longitudinal evidence plan, with bounded coverage manifest, snapshot token, and UUID read batches. |
+| `daytwo sample [n] [--stratify-by year\|month\|none] [filters]` | Deterministic, metadata-only stratified coverage sample (default 48, max 200) — evenly spread across years for longitudinal reading. Feed the uuids to `get`/`get_entries`. |
 | `daytwo search <q> [limit] [filters]` | Full-text search (CJK-capable), optionally narrowed by the `list` filters. |
 | `daytwo list [filters]` | Structured browse — filter/paginate without a text query. `--include-text` returns bounded bodies with explicit truncation metadata; `--order-by date\|length\|editing_time`. |
 | `daytwo tags` | All tags with entry counts, most-used first. |
@@ -222,25 +222,19 @@ Tools exposed (all read-only):
 - `get_stats` — the corpus map: entry counts, date span, and text volume grouped
   by year / month / journal (same filters as `list_entries`). The cheap first
   call for any longitudinal or overview question — no entry text is read.
-- `sample_entries` — deterministic, metadata-only longitudinal evidence planning
-  over year / quarter / month, journal, and starred/pinned coverage. It returns
-  no body or snippet content: only evidence metadata, explicit represented /
-  unsampled-budget / empty / ineligible coverage, matched/eligible/text-volume/
-  date-span population totals, known biases, a stateless `snapshot_token`, and
-  UUID batches for `get_entries`. The same journal / tag / starred / date / place
-  filters as `list_entries` scope candidates, population, and coverage together,
-  so callers can resample a gap or search for counterexamples without changing
-  semantics. Coverage itself is bounded to 64 journals, 32 years, 64 quarters,
-  and 120 months (a complete decade at month resolution). Every dimension
-  reports `cap`, `total`, `returned`, `omitted`, and `truncated`; compacted
-  dimensions preserve represented buckets first, then fill deterministically
-  across the full range. Journal display labels are capped at 256 characters
-  and paired with a collision-safe full-name `journal_ref`, so equal truncated
-  prefixes never merge. Text eligibility treats ASCII and common Unicode
-  whitespace (including newlines, tabs, NBSP, and full-width spaces) as blank
-  without returning bodies from SQLite. Default target 48 (range 8–96).
-  `complete_only` is the default; `best_effort` permits a stable degraded mirror
-  with a prominent failed-entry warning.
+- `sample_entries` — the deterministic, metadata-only complement to `get_stats`
+  for longitudinal reading. `get_stats` shows the *shape* of the corpus;
+  `sample_entries` hands back an even, reproducible slice of it to read. It
+  allocates `n` entries (default 48, max 200) across strata — by year (default),
+  month, or `none` — proportionally to each stratum's size, giving every
+  non-empty stratum at least one while the budget allows (oldest first), and
+  within each stratum picks evenly spaced entries in `(creation_date, uuid)`
+  order. No randomness: the same mirror and arguments always return the same
+  uuids, in chronological order. Results are ordinary metadata-only summaries
+  (`uuid`, `creation_date`, `journal`, `tags`, `starred`, `text_length`,
+  `place_name`) with no body or snippet — feed the uuids straight to
+  `get_entries`. The same journal / tag / starred / date / place filters as
+  `list_entries` scope the sample.
 - `list_journals` — journals + entry counts + `synced_at`.
 - `list_tags` — every tag with its entry count, most-used first.
 - `search_entries` — keyword search over bodies (CJK-capable; see *Search*),
@@ -261,11 +255,8 @@ Tools exposed (all read-only):
   truncated it. Unknown uuids are returned in `missing`. Heavy rich-text/raw
   fields stay on single-entry `get_entry` so a batch cannot silently multiply
   them into an unbounded response; legacy batch flags are rejected with a
-  migration message instead of being silently ignored. For longitudinal
-  evidence, pass the opaque `snapshot_token` from `sample_entries`; validation
-  and reads occur in one short SQLite read transaction. The token is optional
-  for backwards-compatible ordinary batch reads, whose result explicitly has
-  no cross-call snapshot guarantee.
+  migration message instead of being silently ignored. Pair it with
+  `sample_entries` for longitudinal reading: sample the uuids, then read them here.
 - `get_entry_media` — media attached to an entry, as metadata only (never bytes).
 - `get_media` — the decrypted **bytes** of one attachment by identifier (small
   photos inline as an image; larger/other files return metadata only, never a
@@ -279,11 +270,7 @@ degraded, successfully updated entries remain available, failed revisions stay
 pending for retry, and callers can avoid treating the mirror as complete.
 The ingester records `running` before network, decryption, or entry writes, so
 concurrent readers and post-crash readers never mistake an in-flight partial
-mirror for the last complete snapshot. Each start also advances a monotonic
-`sync_generation`; generation/status changes invalidate evidence tokens. Tokens
-do not retain or restore historical mirrors — a stale token means the evidence
-plan must be regenerated. Overlapping ingestion attempts use generation guards
-so a stale process cannot write or finalize after a newer attempt starts.
+mirror for the last complete snapshot.
 
 ## Deployment
 

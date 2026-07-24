@@ -21,12 +21,6 @@
 
 import { type BrowserContext, chromium, type Page } from "playwright-core";
 import { openMirror } from "../../serve/db/open.ts";
-import {
-  assertSyncAttempt,
-  recordSyncOutcome,
-  recordSyncStart,
-  StaleSyncAttemptError,
-} from "../../sync-status.ts";
 import { importExport } from "../json-export/import.ts";
 import { extractStores, forceLoadAllJournals, incompleteJournals } from "./extract.ts";
 import { automatedLogin, isAuthenticated, waitForAuthenticated } from "./login.ts";
@@ -114,50 +108,13 @@ async function main(): Promise<void> {
     const exports = mapStoresToExports(dump);
 
     const db = openMirror(undefined, { writable: true });
-    const attemptedAt = new Date().toISOString();
-    let attempt: ReturnType<typeof recordSyncStart> | undefined;
     let entries = 0;
-    try {
-      attempt = recordSyncStart(db, attemptedAt, "browser");
-      const generation = attempt.sync_generation;
-      db.transaction(() => {
-        assertSyncAttempt(db, generation);
-        for (const { journalName, export: exp } of exports) {
-          const stats = importExport(db, exp, journalName);
-          entries += stats.entries;
-          console.error(`  imported ${journalName}: ${stats.entries} entries, ${stats.media} media`);
-        }
-      }).immediate();
-      const failedEntries = missing.reduce(
-        (sum, row) => sum + Math.max(1, row.expectedEntries - row.loadedEntries),
-        0,
-      );
-      recordSyncOutcome(
-        db,
-        {
-          status: missing.length ? "degraded" : "complete",
-          attemptedAt,
-          failedEntries,
-          source: "browser",
-        },
-        generation,
-      );
-    } catch (error) {
-      if (attempt) {
-        try {
-          recordSyncOutcome(
-            db,
-            { status: "failed", attemptedAt, failedEntries: 0, source: "browser" },
-            attempt.sync_generation,
-          );
-        } catch (outcomeError) {
-          if (!(outcomeError instanceof StaleSyncAttemptError)) throw outcomeError;
-        }
-      }
-      throw error;
-    } finally {
-      db.close();
+    for (const { journalName, export: exp } of exports) {
+      const stats = importExport(db, exp, journalName);
+      entries += stats.entries;
+      console.error(`  imported ${journalName}: ${stats.entries} entries, ${stats.media} media`);
     }
+    db.close();
     console.error(`done: ${entries} entries across ${exports.length} journals → mirror`);
   } finally {
     await context.close();

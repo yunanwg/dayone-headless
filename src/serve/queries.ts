@@ -401,6 +401,12 @@ export const TEXT_BUDGET_MAX_PER_ENTRY_CHARS = 50_000;
 export const TEXT_BUDGET_MAX_TOTAL_CHARS = 100_000;
 export const LIST_ENTRIES_MAX = 200;
 
+/** Default / maximum entries returned by a single stratified coverage sample. */
+export const SAMPLE_ENTRIES_DEFAULT = 48;
+export const SAMPLE_ENTRIES_MAX = 200;
+/** Ways to stratify a coverage sample; "year" gives even decade-scale coverage. */
+export type StratifyBy = "year" | "month" | "none";
+
 /** Slice by Unicode code points so a non-BMP character is never split mid-surrogate. */
 function sliceCodePoints(value: string, maxCodePoints: number): string {
   let end = 0;
@@ -806,6 +812,137 @@ export function listEntriesPage(db: Database, filters: ListFilters = {}): ListEn
       next_offset: hasMore ? offset + results.length : null,
     },
   };
+}
+
+/**
+ * Allocate `target` samples across strata (`counts`, oldest-first) proportionally
+ * to size. Every non-empty stratum gets at least one while the budget allows — if
+ * the budget is smaller than the number of strata the oldest strata are served
+ * first — the remainder is distributed by the D'Hondt highest-averages rule, and
+ * no stratum is ever allocated more entries than it actually holds. Deterministic:
+ * ties resolve to the older (lower-index) stratum.
+ */
+function allocateSample(counts: number[], target: number): number[] {
+  const k = counts.length;
+  const total = counts.reduce((sum, c) => sum + c, 0);
+  const n = Math.min(target, total);
+  const alloc = new Array<number>(k).fill(0);
+  if (n <= 0) return alloc;
+  if (n <= k) {
+    for (let i = 0; i < n; i++) alloc[i] = 1; // budget too small for all strata: oldest first
+    return alloc;
+  }
+  for (let i = 0; i < k; i++) alloc[i] = 1; // minimum one per non-empty stratum
+  let remaining = n - k;
+  while (remaining > 0) {
+    let best = -1;
+    let bestQuotient = -Infinity;
+    for (let i = 0; i < k; i++) {
+      if (alloc[i]! >= counts[i]!) continue; // never exceed the stratum's own size
+      const quotient = counts[i]! / (alloc[i]! + 1);
+      if (quotient > bestQuotient) {
+        bestQuotient = quotient;
+        best = i;
+      }
+    }
+    if (best === -1) break; // every stratum is full (n <= total guarantees room otherwise)
+    alloc[best]!++;
+    remaining--;
+  }
+  return alloc;
+}
+
+/**
+ * Deterministic stratified coverage sample — the reading-list complement to
+ * getStats. getStats tells you the SHAPE of the (optionally filtered) corpus;
+ * sampleEntries hands you an even, reproducible slice of it to actually read.
+ *
+ * `n` entries (default {@link SAMPLE_ENTRIES_DEFAULT}, capped at
+ * {@link SAMPLE_ENTRIES_MAX}) are allocated across strata — by calendar year
+ * ("year", the default, for decade-scale coverage), by month, or a single stratum
+ * ("none") — proportionally to each stratum's entry count via
+ * {@link allocateSample}. Within each stratum evenly spaced entries are picked in
+ * (creation_date, uuid) order. No randomness API is used: the same mirror and the
+ * same arguments always return the same uuids, in chronological order. The result
+ * is ordinary metadata-only entry summaries (no snippet, no body) — feed their
+ * uuids straight to getEntries to read the text.
+ */
+export function sampleEntries(
+  db: Database,
+  n: number = SAMPLE_ENTRIES_DEFAULT,
+  stratifyBy: StratifyBy = "year",
+  filters: ListFilters = {},
+): EntrySummary[] {
+  const target = Math.min(Math.max(1, Math.floor(n)), SAMPLE_ENTRIES_MAX);
+  const { clauses, params } = entryFilterClauses(filters);
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const stratumExpr = {
+    year: "substr(e.creation_date, 1, 4)",
+    month: "substr(e.creation_date, 1, 7)",
+    none: "''",
+  }[stratifyBy];
+
+  // Candidate uuids grouped by stratum. String sort of YYYY / YYYY-MM is
+  // chronological, so `ORDER BY stratum, ...` yields strata oldest-first with each
+  // stratum internally ordered by (creation_date, uuid).
+  const candidates = db
+    .query(
+      `SELECT e.uuid AS uuid, ${stratumExpr} AS stratum
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       ${where}
+       ORDER BY stratum, e.creation_date, e.uuid`,
+    )
+    .all(params) as { uuid: string; stratum: string }[];
+  if (candidates.length === 0) return [];
+
+  const strata: string[][] = [];
+  let currentKey: string | null = null;
+  for (const row of candidates) {
+    if (row.stratum !== currentKey) {
+      strata.push([]);
+      currentKey = row.stratum;
+    }
+    strata[strata.length - 1]!.push(row.uuid);
+  }
+
+  const alloc = allocateSample(
+    strata.map((s) => s.length),
+    target,
+  );
+
+  // Even spacing within a stratum: the k picks are the midpoints of k equal
+  // segments of its C entries, so coverage is spread rather than front-loaded.
+  const picked: string[] = [];
+  for (let i = 0; i < strata.length; i++) {
+    const stratum = strata[i]!;
+    const k = alloc[i]!;
+    const size = stratum.length;
+    for (let j = 0; j < k; j++) {
+      picked.push(stratum[Math.floor(((j + 0.5) * size) / k)]!);
+    }
+  }
+  if (picked.length === 0) return [];
+
+  // Hydrate metadata-only summaries and return in the sampled (chronological) order.
+  const placeholders = picked.map((_, i) => `$u${i}`).join(", ");
+  const hydrateParams: Record<string, string> = {};
+  picked.forEach((uuid, i) => {
+    hydrateParams[`$u${i}`] = uuid;
+  });
+  const rows = db
+    .query(
+      `SELECT e.uuid, e.creation_date, e.place_name, e.starred,
+              j.name AS journal, LENGTH(e.text) AS text_length,
+              ${TAG_LIST_SUBQUERY}
+       FROM entry e JOIN journal j ON j.id = e.journal_id
+       WHERE e.uuid IN (${placeholders})`,
+    )
+    .all(hydrateParams) as (Omit<EntrySummary, "tags"> & { tag_list: string | null })[];
+  const byUuid = new Map(rows.map((row) => [row.uuid, row]));
+  return picked
+    .map((uuid) => byUuid.get(uuid))
+    .filter((row): row is NonNullable<typeof row> => row !== undefined)
+    .map(({ tag_list, ...e }) => ({ ...e, tags: splitTags(tag_list) }));
 }
 
 /** All tags with how many entries carry each, most-used first. */

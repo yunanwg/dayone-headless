@@ -14,7 +14,7 @@
  *   daytwo sync-status          show last attempt + last complete sync state
  *   daytwo journals             list journals + counts + freshness
  *   daytwo stats <group_by>     corpus map: counts/text volume by year|month|journal
- *   daytwo sample [target] [filters]  metadata-only longitudinal evidence plan
+ *   daytwo sample [n] [filters] deterministic stratified coverage sample (metadata only)
  *   daytwo search <q> [limit]   full-text search (CJK-capable)
  *   daytwo list [filters]       structured browse (see flags below)
  *   daytwo tags                 all tags with entry counts
@@ -28,13 +28,13 @@
  *   --place <substr> --limit <n> --offset <n>
  *   --include-text --max-chars-per-entry <n> --max-total-chars <n> (list only)
  *   --order-by date|length|editing_time (list only)
+ *   --stratify-by year|month|none (sample only; default year)
  */
 
 import { existsSync } from "node:fs";
 import { boundedPositiveInteger, SYNC_INTERVAL_BOUNDS } from "../runtime-config.ts";
 import { requireSecret } from "../secret-config.ts";
 import { DEFAULT_MIRROR, openMirror } from "./db/open.ts";
-import { SnapshotValidationError, sampleEntries } from "./evidence.ts";
 import {
   getEntry,
   getEntryMedia,
@@ -48,6 +48,10 @@ import {
   listTags,
   onThisDay,
   resolveMedia,
+  SAMPLE_ENTRIES_DEFAULT,
+  SAMPLE_ENTRIES_MAX,
+  type StratifyBy,
+  sampleEntries,
   searchEntries,
 } from "./queries.ts";
 
@@ -259,56 +263,43 @@ switch (cmd) {
   }
 
   case "sample": {
-    let target: number | undefined;
-    let bestEffort = false;
-    const filters: ListFilters = {};
+    // Deterministic stratified coverage sample: a positional entry count, an
+    // optional --stratify-by dimension, and the same structured filters as `list`.
+    const VALUE_FLAGS = new Set(["--journal", "--tag", "--from", "--to", "--place", "--limit", "--offset"]);
+    let n = SAMPLE_ENTRIES_DEFAULT;
+    let stratifyBy: StratifyBy = "year";
+    const filterArgs: string[] = [];
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i]!;
-      if (arg === "--best-effort") {
-        bestEffort = true;
-      } else if (arg === "--target") {
+      if (arg === "--stratify-by") {
         const value = rest[++i];
-        if (value === undefined) {
-          console.error("--target requires a value");
+        if (value !== "year" && value !== "month" && value !== "none") {
+          console.error("usage: daytwo sample [n] [--stratify-by year|month|none] [filters]");
           process.exit(1);
         }
-        target = Number(value);
-      } else if (arg === "--journal") {
-        filters.journal = rest[++i];
-      } else if (arg === "--tag") {
-        filters.tag = rest[++i];
+        stratifyBy = value;
+      } else if (arg === "--n") {
+        n = Number(rest[++i]);
       } else if (arg === "--starred") {
-        filters.starred = true;
-      } else if (arg === "--from") {
-        filters.from = rest[++i];
-      } else if (arg === "--to") {
-        filters.to = rest[++i];
-      } else if (arg === "--place") {
-        filters.place = rest[++i];
-      } else if (!arg.startsWith("--") && target === undefined) {
-        target = Number(arg);
+        filterArgs.push(arg);
+      } else if (VALUE_FLAGS.has(arg)) {
+        filterArgs.push(arg, rest[++i]!);
+      } else if (!arg.startsWith("--")) {
+        n = Number(arg);
       } else {
         console.error(`unknown sample option: ${arg}`);
         process.exit(1);
       }
     }
-    const db = requireMirror();
-    try {
-      out(
-        sampleEntries(db, {
-          target,
-          mode: bestEffort ? "best_effort" : "complete_only",
-          ...filters,
-        }),
-      );
-    } catch (error) {
-      if (error instanceof SnapshotValidationError) {
-        console.error(`${error.code}: ${error.message}`);
-        db.close();
-        process.exit(2);
-      }
-      throw error;
+    if (!Number.isInteger(n) || n < 1 || n > SAMPLE_ENTRIES_MAX) {
+      console.error(`sample count must be an integer from 1 to ${SAMPLE_ENTRIES_MAX}`);
+      process.exit(1);
     }
+    const db = requireMirror();
+    out({
+      ...getFreshness(db),
+      entries: sampleEntries(db, n, stratifyBy, parseListFilters(filterArgs)),
+    });
     db.close();
     break;
   }
@@ -393,7 +384,7 @@ switch (cmd) {
 
   default:
     console.error(
-      "commands: sync | sync-loop | sync-status | media-fetch [uuid] | mcp | health-sync | health-mcp | doctor | journals | stats <year|month|journal> | sample [target] [--best-effort] | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
+      "commands: sync | sync-loop | sync-status | media-fetch [uuid] | mcp | health-sync | health-mcp | doctor | journals | stats <year|month|journal> | sample [n] [--stratify-by year|month|none] | search <q> [limit] | list [filters] | tags | get <uuid> | media <uuid> | media-file <id> | on-this-day [MM-DD]",
     );
     process.exit(cmd ? 1 : 0);
 }
