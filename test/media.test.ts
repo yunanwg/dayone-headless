@@ -84,15 +84,19 @@ test("decryptAttachment round-trips a synthetic D1 type-2 envelope", async () =>
     lockedKey,
     iv,
     ctTag,
-    new Uint8Array(16), // trailing md5, stripped by parseD1
   ];
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const blob = new Uint8Array(total);
+  const prefixLen = parts.reduce((n, p) => n + p.length, 0);
+  const prefix = new Uint8Array(prefixLen);
   let off = 0;
   for (const p of parts) {
-    blob.set(p, off);
+    prefix.set(p, off);
     off += p.length;
   }
+  // Append the real trailing MD5 over bytes[0..len-16) that parseD1 now verifies.
+  const md5 = new Uint8Array(createHash("md5").update(prefix).digest());
+  const blob = new Uint8Array(prefixLen + md5.length);
+  blob.set(prefix, 0);
+  blob.set(md5, prefixLen);
 
   const out = await decryptAttachment(kp.privateKey, blob);
   expect(new TextDecoder().decode(out)).toBe("the original file bytes \u{1F4F7}");
