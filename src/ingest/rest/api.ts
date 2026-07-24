@@ -228,8 +228,16 @@ function decodeLine(chunks: readonly Uint8Array[], byteLength: number): string {
 }
 
 /**
- * Parse the entries feed in one streaming pass. Every non-empty line consumes
- * the item budget before JSON parsing, including protocol framing records.
+ * Parse the entries feed in one streaming pass.
+ *
+ * The feed is NOT plain NDJSON: it is length-delimited. Each record is a JSON
+ * header line, then `\n`, then `contentLength` bytes of the entry's BINARY D1
+ * content — and that binary contains 0x0a bytes of its own. Splitting on 0x0a
+ * therefore shreds every inline blob into many non-JSON fragments. Those
+ * fragments carry no feed item, so they are skipped (never fatal); only lines
+ * that parse into a real feed item (with `revision.entryId`) are kept and count
+ * toward the item budget. The inline binary is intentionally discarded here —
+ * entry content is re-fetched per entry via `getEntryContent`.
  */
 export async function readEntriesFeed(response: Response): Promise<FeedItem[]> {
   const maximumBytes = UPSTREAM_RESPONSE_LIMITS.entriesFeed;
@@ -253,21 +261,24 @@ export async function readEntriesFeed(response: Response): Promise<FeedItem[]> {
     lineBytes = 0;
     if (!line) return;
 
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // A fragment of inline binary D1 content, not a JSON header line. Skip it;
+      // it carries no feed item and is fetched per entry elsewhere.
+      return;
+    }
+    const candidate = parsed as Partial<FeedItem> | null;
+    if (!candidate?.revision?.entryId) return;
+
     lineCount++;
     if (lineCount > MAX_FEED_ITEMS_PER_JOURNAL) {
       throw new ApiError(
         `upstream entries feed exceeded the ${MAX_FEED_ITEMS_PER_JOURNAL}-item safety limit`,
       );
     }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      throw new ApiError("upstream entries feed contained malformed JSON");
-    }
-    const candidate = parsed as Partial<FeedItem> | null;
-    if (candidate?.revision?.entryId) items.push(candidate as FeedItem);
+    items.push(candidate as FeedItem);
   };
 
   try {
