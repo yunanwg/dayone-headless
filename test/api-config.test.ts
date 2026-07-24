@@ -80,11 +80,59 @@ test("entries feed parses across chunks without split/filter/map amplification",
   expect(items[0]?.revision.entryId).toBe("synthetic-entry");
 });
 
-test("entries feed counts every non-empty line and rejects malformed or excessive input", async () => {
-  await expect(readEntriesFeed(new Response("{not-json}\n"))).rejects.toThrow(/malformed JSON/);
+test("entries feed skips non-JSON lines and counts only real feed items", async () => {
+  // The feed is length-delimited: JSON header lines are interleaved with inline
+  // binary entry content that carries embedded 0x0a. Non-JSON fragments and JSON
+  // lines without a feed item are tolerated (skipped), never fatal.
+  const skipped = await readEntriesFeed(new Response('{not-json}\n{"framing":true}\n'));
+  expect(skipped).toHaveLength(0);
 
-  const overLimit = `${"{}\n".repeat(MAX_FEED_ITEMS_PER_JOURNAL + 1)}`;
+  // Only lines that parse into a real feed item (revision.entryId) count toward
+  // the safety limit, so JSON noise cannot exhaust it by itself.
+  const noise = `${"{}\n".repeat(MAX_FEED_ITEMS_PER_JOURNAL + 1)}`;
+  expect(await readEntriesFeed(new Response(noise))).toHaveLength(0);
+
+  const feedItem = '{"revision":{"entryId":"synthetic"}}\n';
+  const overLimit = feedItem.repeat(MAX_FEED_ITEMS_PER_JOURNAL + 1);
   await expect(readEntriesFeed(new Response(overLimit))).rejects.toThrow(/item safety limit/);
+});
+
+test("entries feed tolerates inline binary D1 content with embedded newlines", async () => {
+  // Reproduce the real length-delimited framing: each record is a JSON header
+  // line, then `\n`, then contentLength bytes of BINARY D1 content that itself
+  // contains 0x0a bytes. A naive 0x0a splitter shreds that binary into non-JSON
+  // fragments; the parser must skip them and still recover the two real items.
+  const enc = new TextEncoder();
+  // A synthetic D1-shaped blob: "D1" magic, a version/type byte, and payload
+  // bytes deliberately including 0x0a so the splitter cuts through it.
+  const binaryBody = new Uint8Array([
+    0x44, 0x31, 0x01, 0x02, 0xef, 0xbf, 0xbd, 0x0a, 0x7b, 0x0a, 0xde, 0xad, 0x0a, 0xbe, 0xef,
+  ]);
+  const record = (entryId: string): Uint8Array => {
+    const header = enc.encode(`{"revision":{"entryId":"${entryId}"},"contentLength":${binaryBody.length}}\n`);
+    const trailer = enc.encode("\n");
+    const out = new Uint8Array(header.length + binaryBody.length + trailer.length);
+    out.set(header, 0);
+    out.set(binaryBody, header.length);
+    out.set(trailer, header.length + binaryBody.length);
+    return out;
+  };
+  const first = record("synthetic-1");
+  const second = record("synthetic-2");
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      // Split a chunk boundary mid-binary to exercise cross-chunk assembly too.
+      const midpoint = first.length + 5;
+      const all = new Uint8Array(first.length + second.length);
+      all.set(first, 0);
+      all.set(second, first.length);
+      controller.enqueue(all.subarray(0, midpoint));
+      controller.enqueue(all.subarray(midpoint));
+      controller.close();
+    },
+  });
+  const items = await readEntriesFeed(new Response(body));
+  expect(items.map((i) => i.revision.entryId)).toEqual(["synthetic-1", "synthetic-2"]);
 });
 
 test("entries feed status and transport errors never echo a journal identifier", async () => {
