@@ -12,7 +12,6 @@ const complete: SyncStatus = {
   last_attempt_at: "2026-01-01T00:00:00.000Z",
   last_complete_at: "2026-01-01T00:00:00.000Z",
   failed_entries: 0,
-  sync_generation: 1,
 };
 
 test("sync readiness separates latest outcome from last-complete freshness", () => {
